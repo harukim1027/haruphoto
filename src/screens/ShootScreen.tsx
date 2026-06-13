@@ -6,8 +6,10 @@ import {
   useCameraPermission,
   useSkiaFrameProcessor,
   VisionCameraProxy,
+  type CameraDevice,
   type CameraPosition,
 } from 'react-native-vision-camera';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { PaintStyle, Skia } from '@shopify/react-native-skia';
 import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -33,6 +35,33 @@ type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
 type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
+
+// 화면 배율 프리셋(쉽게 추가/수정). 화면배율 ≠ VisionCamera zoom 값.
+const ZOOM_PRESETS = [0.5, 0.6, 0.9, 1, 1.5, 2];
+
+const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
+
+// 화면 배율(0.5x=초광각, 1x=광각) → device zoom 값
+//  0.5x → minZoom, 1x → neutralZoom (그 사이는 보간), 1x↑ → neutralZoom*배율
+function displayToZoom(d: number, dev: CameraDevice): number {
+  const z =
+    d >= 1
+      ? dev.neutralZoom * d
+      : dev.minZoom + ((d - 0.5) / 0.5) * (dev.neutralZoom - dev.minZoom);
+  return clamp(z, dev.minZoom, dev.maxZoom);
+}
+// device zoom 값 → 화면 배율 (버튼 하이라이트용)
+function zoomToDisplay(z: number, dev: CameraDevice): number {
+  if (z >= dev.neutralZoom) return z / dev.neutralZoom;
+  if (dev.neutralZoom <= dev.minZoom + 1e-3) return 1;
+  return 0.5 + ((z - dev.minZoom) / (dev.neutralZoom - dev.minZoom)) * 0.5;
+}
+// 기기에 해당 배율이 가능한지 (초광각 없으면 <1x 불가)
+function presetAvailable(d: number, dev: CameraDevice): boolean {
+  if (d < 1) return dev.minZoom < dev.neutralZoom * 0.97;
+  if (d > 1) return dev.neutralZoom * d <= dev.maxZoom * 1.02;
+  return true;
+}
 
 const JOINT_KEYS: (keyof PoseJoints)[] = [
   'neck',
@@ -110,17 +139,27 @@ export default function ShootScreen() {
   const [hasFace, setHasFace] = useState(false);
   const [capturing, setCapturing] = useState(false);
 
-  const neutral = device?.neutralZoom ?? 1;
-  const [zoom, setZoom] = useState(neutral);
+  const [zoom, setZoom] = useState(device?.neutralZoom ?? 1);
+  const startZoom = useRef(device?.neutralZoom ?? 1);
   useEffect(() => {
-    setZoom(device?.neutralZoom ?? 1);
-  }, [device?.neutralZoom, position]);
-  const zoomPresets = device
-    ? [0.5, 0.6, 0.8, 1, 1.5, 2].filter((m) => {
-        const z = neutral * m;
-        return z >= device.minZoom - 1e-3 && z <= device.maxZoom + 1e-3;
-      })
-    : [];
+    if (!device) return;
+    setZoom(device.neutralZoom); // 디바이스/전후면 바뀌면 1x로 리셋
+    console.log(
+      `[zoom] ${position} lenses=${JSON.stringify(device.physicalDevices)} ` +
+        `min=${device.minZoom.toFixed(3)} neutral=${device.neutralZoom.toFixed(3)} max=${device.maxZoom.toFixed(2)}`,
+    );
+  }, [device, position]);
+
+  // 핀치 연속 줌
+  const pinch = Gesture.Pinch()
+    .runOnJS(true)
+    .onBegin(() => {
+      startZoom.current = zoom;
+    })
+    .onUpdate((e) => {
+      if (!device) return;
+      setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
+    });
 
   const highSince = useSharedValue(0);
   const cooldownUntil = useSharedValue(0);
@@ -240,18 +279,23 @@ export default function ShootScreen() {
     );
   }
 
+  const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device));
+  const activeMul = zoomToDisplay(zoom, device);
+
   return (
     <View style={styles.container}>
-      <Camera
-        ref={cameraRef}
-        style={StyleSheet.absoluteFill}
-        device={device}
-        isActive={!capturing}
-        photo
-        frameProcessor={frameProcessor}
-        pixelFormat="yuv"
-        zoom={zoom}
-      />
+      <GestureDetector gesture={pinch}>
+        <Camera
+          ref={cameraRef}
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={!capturing}
+          photo
+          frameProcessor={frameProcessor}
+          pixelFormat="yuv"
+          zoom={zoom}
+        />
+      </GestureDetector>
 
       {/* 큰 가이드 문구 */}
       <View pointerEvents="none" style={styles.guideWrap}>
@@ -273,19 +317,19 @@ export default function ShootScreen() {
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
-      {/* 줌/렌즈 프리셋 */}
-      {zoomPresets.length > 1 && (
+      {/* 줌/렌즈 프리셋 (기기에 있는 배율만, 핀치로 연속 줌도 가능) */}
+      {presets.length > 1 && (
         <View style={styles.zoomRow}>
-          {zoomPresets.map((m) => {
-            const active = Math.abs(zoom - neutral * m) < neutral * 0.04;
+          {presets.map((m) => {
+            const active = Math.abs(activeMul - m) < 0.06;
             return (
               <Pressable
                 key={m}
                 style={[styles.zoomBtn, active && styles.zoomBtnOn]}
-                onPress={() => setZoom(neutral * m)}
+                onPress={() => setZoom(displayToZoom(m, device))}
               >
                 <Text style={[styles.zoomText, active && styles.zoomTextOn]}>
-                  {active ? `${m}×` : m}
+                  {active ? `${m}×` : `${m}`}
                 </Text>
               </Pressable>
             );
