@@ -39,6 +39,14 @@ export default function HomeScreen() {
         <Text style={styles.ctaText}>레퍼런스 사진 고르기</Text>
       </Pressable>
 
+      {/* Apple Vision 스파이크 진입 (임시) */}
+      <Pressable
+        style={styles.spike}
+        onPress={() => navigation.navigate('FaceVisionSpike')}
+      >
+        <Text style={styles.spikeText}>🧪 Face Vision 스파이크 (각도/표정/fps)</Text>
+      </Pressable>
+
       <Text style={styles.sectionLabel}>
         {sessions.length > 0 ? '지난 촬영' : ''}
       </Text>

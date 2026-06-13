@@ -6,6 +6,7 @@ import HomeScreen from './src/screens/HomeScreen';
 import ReferencePickScreen from './src/screens/ReferencePickScreen';
 import ShootScreen from './src/screens/ShootScreen';
 import CompareScreen from './src/screens/CompareScreen';
+import FaceVisionSpikeScreen from './src/face/FaceVisionSpikeScreen';
 import type { PoseArray } from './src/types';
 
 export type RootStackParamList = {
@@ -18,6 +19,8 @@ export type RootStackParamList = {
     matchScore: number;
     fromHistory: boolean;
   };
+  // Apple Vision 스파이크 (네이티브 detectFace 검증용 임시 화면)
+  FaceVisionSpike: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -46,6 +49,11 @@ export default function App() {
           options={{ headerTransparent: true }}
         />
         <Stack.Screen name="Compare" component={CompareScreen} />
+        <Stack.Screen
+          name="FaceVisionSpike"
+          component={FaceVisionSpikeScreen}
+          options={{ headerTransparent: true }}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );
