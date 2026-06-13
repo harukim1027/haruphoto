@@ -1,25 +1,36 @@
 {
   "expo": {
-    "name": "haruphoto",
+    "name": "하루포토",
     "slug": "haruphoto",
-    "version": "1.0.0",
+    "version": "0.1.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "bundleIdentifier": "com.haru.haruphoto",
+      "supportsTablet": false
     },
-    "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    }
+    "plugins": [
+      "./plugins/withBuildFixes",
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "포즈 가이드 촬영을 위해 카메라 접근이 필요합니다.",
+          "enableCodeScanner": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "레퍼런스로 쓸 사진을 고르기 위해 앨범 접근이 필요합니다."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "촬영한 사진을 갤러리에 저장하기 위해 필요합니다."
+        }
+      ],
+      "expo-asset"
+    ]
   }
 }
