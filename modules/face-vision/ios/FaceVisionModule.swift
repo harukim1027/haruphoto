@@ -31,22 +31,34 @@ public class FaceVisionModule: Module {
       } catch {
         return ["found": false, "err": "vision_failed: \(error.localizedDescription)"]
       }
+      // EXIF 적용 후 upright(표시) 크기
+      let o = image.imageOrientation
+      let isSide = (o == .left || o == .right || o == .leftMirrored || o == .rightMirrored)
+      let upW = isSide ? cg.height : cg.width
+      let upH = isSide ? cg.width : cg.height
       guard let face = request.results?.first else {
-        return ["found": false, "err": "no_face", "imgW": Double(cg.width), "imgH": Double(cg.height)]
+        return ["found": false, "err": "no_face", "imgW": Double(upW), "imgH": Double(upH)]
       }
-      return Self.features(from: face)
+      return Self.features(from: face, imgW: upW, imgH: upH)
     }
   }
 
   // MARK: - Vision 추출 (FaceVisionPlugin 과 동일 로직, 정지이미지용)
 
-  static func features(from face: VNFaceObservation) -> [String: Any] {
+  static func features(from face: VNFaceObservation, imgW: Int, imgH: Int) -> [String: Any] {
     var out: [String: Any] = ["found": true, "mirrored": false]
+    out["imgW"] = Double(imgW)
+    out["imgH"] = Double(imgH)
 
     let bb = face.boundingBox
     out["x"] = Double(bb.midX)
     out["y"] = Double(1.0 - bb.midY)
     out["size"] = Double(max(bb.width, bb.height))
+    // bbox (top-left 정규화) — cover 매핑으로 화면에 그리기 위함
+    out["bx"] = Double(bb.minX)
+    out["by"] = Double(1.0 - bb.maxY)
+    out["bw"] = Double(bb.width)
+    out["bh"] = Double(bb.height)
 
     out["yaw"] = face.yaw?.doubleValue ?? 0
     out["roll"] = face.roll?.doubleValue ?? 0
@@ -72,7 +84,25 @@ public class FaceVisionModule: Module {
     let g2 = gaze(pupil: lm.rightPupil, eye: lm.rightEye)
     out["gazeX"] = (g.x + g2.x) / 2.0
     out["gazeY"] = (g.y + g2.y) / 2.0
+
+    // 검증/오버레이용 랜드마크 점 (top-left 정규화 이미지 좌표)
+    var points: [String: Any] = [:]
+    if let p = centroidTopLeft(lm.leftEye, bb: bb) { points["leftEye"] = p }
+    if let p = centroidTopLeft(lm.rightEye, bb: bb) { points["rightEye"] = p }
+    if let p = centroidTopLeft(lm.nose, bb: bb) { points["nose"] = p }
+    if let p = centroidTopLeft(lm.outerLips, bb: bb) { points["mouth"] = p }
+    out["points"] = points
     return out
+  }
+
+  /// 랜드마크 region 중심 → top-left 정규화 이미지 좌표 (Mac 검증된 매핑)
+  private static func centroidTopLeft(_ region: VNFaceLandmarkRegion2D?, bb: CGRect) -> [String: Double]? {
+    guard let pts = region?.normalizedPoints, !pts.isEmpty else { return nil }
+    let cx = pts.map { Double($0.x) }.reduce(0, +) / Double(pts.count)
+    let cy = pts.map { Double($0.y) }.reduce(0, +) / Double(pts.count)
+    let ix = Double(bb.minX) + cx * Double(bb.width)
+    let iyBottom = Double(bb.minY) + cy * Double(bb.height)
+    return ["x": ix, "y": 1.0 - iyBottom]
   }
 
   private static func aspect(_ region: VNFaceLandmarkRegion2D?) -> Double {

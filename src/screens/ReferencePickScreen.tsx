@@ -12,7 +12,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { extractFaceFromImage } from '../face/extractFaceFromImage';
-import type { FaceFeatures } from '../face/types';
+import { mapCover, type FaceFeatures, type Pt } from '../face/types';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ReferencePick'>;
@@ -55,16 +55,17 @@ export default function ReferencePickScreen() {
     }
   };
 
-  // 검출된 얼굴 위치 표시용 (preview 좌표)
-  const faceMarker =
-    features != null
-      ? {
-          left: features.framing.cx * previewW - (features.framing.size * previewW) / 2,
-          top: features.framing.cy * previewH - (features.framing.size * previewH) / 2,
-          width: features.framing.size * previewW,
-          height: features.framing.size * previewH,
-        }
-      : null;
+  // 검증용: 랜드마크 점(눈/코/입)을 표시된 이미지(cover) 기준으로 매핑
+  const img = features?.imageSize;
+  const lm = features?.landmarks;
+  const toScreen = (p?: Pt) =>
+    p && img ? mapCover(p.x, p.y, img.w, img.h, previewW, previewH) : null;
+  const dots: { p: Pt | null; color: string; key: string }[] = [
+    { p: toScreen(lm?.leftEye), color: '#00E08A', key: 'le' },
+    { p: toScreen(lm?.rightEye), color: '#22D3EE', key: 're' },
+    { p: toScreen(lm?.nose), color: '#FFD400', key: 'no' },
+    { p: toScreen(lm?.mouth), color: '#FF5A5A', key: 'mo' },
+  ];
 
   return (
     <View style={styles.container}>
@@ -80,7 +81,19 @@ export default function ReferencePickScreen() {
         {uri ? (
           <>
             <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-            {faceMarker && <View style={[styles.faceBox, faceMarker]} />}
+            {dots.map(
+              (d) =>
+                d.p && (
+                  <View
+                    key={d.key}
+                    pointerEvents="none"
+                    style={[
+                      styles.dot,
+                      { left: d.p.x - 7, top: d.p.y - 7, backgroundColor: d.color },
+                    ]}
+                  />
+                ),
+            )}
           </>
         ) : (
           <Text style={styles.previewHint}>탭해서 사진 선택</Text>
@@ -133,11 +146,13 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   previewHint: { color: '#55555E', fontSize: 15 },
-  faceBox: {
+  dot: {
     position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
     borderWidth: 2,
-    borderColor: '#00E08A',
-    borderRadius: 999,
+    borderColor: '#000',
   },
   busyOverlay: {
     ...StyleSheet.absoluteFillObject,

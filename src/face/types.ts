@@ -1,4 +1,9 @@
-// Apple Vision 프레임프로세서('detectFace')가 프레임당 돌려주는 원시 결과
+export interface Pt {
+  x: number;
+  y: number;
+}
+
+// Apple Vision('detectFace'/'FaceVision')이 돌려주는 원시 결과
 export interface FaceVisionResult {
   found: boolean;
   mirrored?: boolean;
@@ -6,6 +11,14 @@ export interface FaceVisionResult {
   x?: number;
   y?: number;
   size?: number;
+  // bbox (top-left 정규화)
+  bx?: number;
+  by?: number;
+  bw?: number;
+  bh?: number;
+  // 이미지 upright 크기 (cover 매핑용)
+  imgW?: number;
+  imgH?: number;
   // 각도 (radian)
   yaw?: number;
   pitch?: number;
@@ -15,9 +28,16 @@ export interface FaceVisionResult {
   smile?: number;
   leftEyeOpen?: number;
   rightEyeOpen?: number;
-  // 시선 근사 (0~1, 0.5=중앙)
+  // 시선 근사 (0~1)
   gazeX?: number;
   gazeY?: number;
+  // 검증/오버레이용 랜드마크 점 (top-left 정규화 이미지 좌표)
+  points?: {
+    leftEye?: Pt;
+    rightEye?: Pt;
+    nose?: Pt;
+    mouth?: Pt;
+  };
 }
 
 // 매칭에 쓰는 정리된 얼굴 특징
@@ -31,6 +51,10 @@ export interface FaceFeatures {
     rightEyeOpen: number;
   };
   gaze: { x: number; y: number };
+  // 오버레이용 (정규화 top-left 이미지 좌표). 매칭에는 안 씀.
+  imageSize?: { w: number; h: number };
+  bbox?: { x: number; y: number; w: number; h: number };
+  landmarks?: { leftEye?: Pt; rightEye?: Pt; nose?: Pt; mouth?: Pt };
 }
 
 /**
@@ -62,5 +86,31 @@ export function toFaceFeatures(r: FaceVisionResult): FaceFeatures | null {
       x: r.mirrored ? 1 - (r.gazeX ?? 0.5) : r.gazeX ?? 0.5,
       y: r.gazeY ?? 0.5,
     },
+    imageSize: r.imgW && r.imgH ? { w: r.imgW, h: r.imgH } : undefined,
+    bbox:
+      r.bx != null
+        ? { x: r.bx, y: r.by ?? 0, w: r.bw ?? 0, h: r.bh ?? 0 }
+        : undefined,
+    landmarks: r.points,
   };
+}
+
+/**
+ * 정규화 top-left 이미지 좌표 → resizeMode="cover" 컨테이너 화면 좌표.
+ * cover 는 컨테이너를 꽉 채우며 넘치는 부분을 자르므로, 표시된 이미지 기준으로 변환해야 한다.
+ */
+export function mapCover(
+  nx: number,
+  ny: number,
+  imgW: number,
+  imgH: number,
+  contW: number,
+  contH: number,
+): Pt {
+  const scale = Math.max(contW / imgW, contH / imgH);
+  const dispW = imgW * scale;
+  const dispH = imgH * scale;
+  const offX = (contW - dispW) / 2;
+  const offY = (contH - dispH) / 2;
+  return { x: offX + nx * dispW, y: offY + ny * dispH };
 }
