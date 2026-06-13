@@ -20,14 +20,16 @@ public class FaceVisionModule: Module {
       guard let cg = image.cgImage else {
         return ["found": false, "err": "no_cgimage"]
       }
-      let request = VNDetectFaceLandmarksRequest()
+      let faceReq = VNDetectFaceLandmarksRequest()
+      let bodyReq = VNDetectHumanRectanglesRequest()
+      if #available(iOS 15.0, *) { bodyReq.upperBodyOnly = true }
       let handler = VNImageRequestHandler(
         cgImage: cg,
         orientation: Self.cgOrientation(image.imageOrientation),
         options: [:]
       )
       do {
-        try handler.perform([request])
+        try handler.perform([faceReq, bodyReq])
       } catch {
         return ["found": false, "err": "vision_failed: \(error.localizedDescription)"]
       }
@@ -36,11 +38,21 @@ public class FaceVisionModule: Module {
       let isSide = (o == .left || o == .right || o == .leftMirrored || o == .rightMirrored)
       let upW = isSide ? cg.height : cg.width
       let upH = isSide ? cg.width : cg.height
-      guard let face = request.results?.first else {
+      guard let face = faceReq.results?.first else {
         return ["found": false, "err": "no_face", "imgW": Double(upW), "imgH": Double(upH)]
       }
-      return Self.features(from: face, imgW: upW, imgH: upH)
+      var result = Self.features(from: face, imgW: upW, imgH: upH)
+      if let body = Self.bodyBox(bodyReq.results?.first) { result["body"] = body }
+      return result
     }
+  }
+
+  /// 상체 박스 → top-left 정규화 dict
+  static func bodyBox(_ obs: VNHumanObservation?) -> [String: Double]? {
+    guard let b = obs, b.confidence > 0.3 else { return nil }
+    let bb = b.boundingBox
+    return ["x": Double(bb.minX), "y": Double(1.0 - bb.maxY),
+            "w": Double(bb.width), "h": Double(bb.height)]
   }
 
   // MARK: - Vision 추출 (FaceVisionPlugin 과 동일 로직, 정지이미지용)

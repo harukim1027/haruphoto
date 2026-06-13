@@ -24,18 +24,26 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     }
 
     let orientation = cgOrientation(from: frame.orientation)
-    let request = VNDetectFaceLandmarksRequest()
+    let faceReq = VNDetectFaceLandmarksRequest()
+    let bodyReq = VNDetectHumanRectanglesRequest()
+    if #available(iOS 15.0, *) { bodyReq.upperBodyOnly = true }
     let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
     do {
-      try handler.perform([request])
+      try handler.perform([faceReq, bodyReq])
     } catch {
       return ["found": false]
     }
 
-    guard let face = (request.results)?.first else {
+    guard let face = (faceReq.results)?.first else {
       return ["found": false]
     }
-    return Self.features(from: face, mirrored: frame.isMirrored)
+    var result = Self.features(from: face, mirrored: frame.isMirrored)
+    if let b = bodyReq.results?.first, b.confidence > 0.3 {
+      let bb = b.boundingBox
+      result["body"] = ["x": Double(bb.minX), "y": Double(1.0 - bb.maxY),
+                        "w": Double(bb.width), "h": Double(bb.height)]
+    }
+    return result
   }
 
   /// VNFaceObservation → 정규화된 특징 딕셔너리

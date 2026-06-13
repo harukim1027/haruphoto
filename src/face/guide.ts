@@ -28,7 +28,20 @@ export function guideText(
     min = scores.gaze;
     key = 'gaze';
   }
+  if (scores.hasBody && scores.body < min) {
+    min = scores.body;
+    key = 'body';
+  }
   if (min >= 0.8) return '좋아요! 그대로 유지하세요';
+
+  if (key === 'body') {
+    if (!live.body || !ref.body) return '상체가 더 보이게 뒤로';
+    const dcx = live.body.cx - ref.body.cx;
+    const dw = live.body.w - ref.body.w;
+    if (Math.abs(dw) > 0.18) return dw < 0 ? '상체를 더 보이게' : '조금 더 가까이';
+    if (Math.abs(dcx) > 0.08) return dcx > 0 ? '몸을 살짝 왼쪽으로' : '몸을 살짝 오른쪽으로';
+    return '자세를 사진처럼 맞춰보세요';
+  }
 
   if (key === 'framing') {
     const ds = live.framing.size - ref.framing.size;

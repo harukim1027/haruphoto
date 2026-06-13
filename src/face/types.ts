@@ -38,6 +38,8 @@ export interface FaceVisionResult {
     nose?: Pt;
     mouth?: Pt;
   };
+  // 상체 박스 (top-left 정규화) — 자세/프레이밍용
+  body?: { x: number; y: number; w: number; h: number };
 }
 
 // 매칭에 쓰는 정리된 얼굴 특징
@@ -51,9 +53,12 @@ export interface FaceFeatures {
     rightEyeOpen: number;
   };
   gaze: { x: number; y: number };
+  // 자세: 상체 박스(중심/크기, mirror 보정됨). 반신 셀카면 존재, 얼굴만이면 undefined.
+  body?: { cx: number; cy: number; w: number; h: number };
   // 오버레이용 (정규화 top-left 이미지 좌표). 매칭에는 안 씀.
   imageSize?: { w: number; h: number };
   bbox?: { x: number; y: number; w: number; h: number };
+  bodyBox?: { x: number; y: number; w: number; h: number }; // top-left (오버레이)
   landmarks?: { leftEye?: Pt; rightEye?: Pt; nose?: Pt; mouth?: Pt };
 }
 
@@ -86,11 +91,24 @@ export function toFaceFeatures(r: FaceVisionResult): FaceFeatures | null {
       x: r.mirrored ? 1 - (r.gazeX ?? 0.5) : r.gazeX ?? 0.5,
       y: r.gazeY ?? 0.5,
     },
+    body: r.body
+      ? {
+          cx: r.mirrored
+            ? 1 - (r.body.x + r.body.w / 2)
+            : r.body.x + r.body.w / 2,
+          cy: r.body.y + r.body.h / 2,
+          w: r.body.w,
+          h: r.body.h,
+        }
+      : undefined,
     imageSize: r.imgW && r.imgH ? { w: r.imgW, h: r.imgH } : undefined,
     bbox:
       r.bx != null
         ? { x: r.bx, y: r.by ?? 0, w: r.bw ?? 0, h: r.bh ?? 0 }
         : undefined,
+    bodyBox: r.body
+      ? { x: r.body.x, y: r.body.y, w: r.body.w, h: r.body.h }
+      : undefined,
     landmarks: r.points,
   };
 }

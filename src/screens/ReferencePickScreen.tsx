@@ -66,6 +66,16 @@ export default function ReferencePickScreen() {
     { p: toScreen(lm?.nose), color: '#FFD400', key: 'no' },
     { p: toScreen(lm?.mouth), color: '#FF5A5A', key: 'mo' },
   ];
+  // 검출된 상체 박스(자세) — cover 매핑
+  const bb = features?.bodyBox;
+  const bodyRect =
+    bb && img
+      ? (() => {
+          const tl = mapCover(bb.x, bb.y, img.w, img.h, previewW, previewH);
+          const br = mapCover(bb.x + bb.w, bb.y + bb.h, img.w, img.h, previewW, previewH);
+          return { left: tl.x, top: tl.y, width: br.x - tl.x, height: br.y - tl.y };
+        })()
+      : null;
 
   return (
     <View style={styles.container}>
@@ -81,6 +91,7 @@ export default function ReferencePickScreen() {
         {uri ? (
           <>
             <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+            {bodyRect && <View pointerEvents="none" style={[styles.bodyRect, bodyRect]} />}
             {dots.map(
               (d) =>
                 d.p && (
@@ -153,6 +164,13 @@ const styles = StyleSheet.create({
     borderRadius: 7,
     borderWidth: 2,
     borderColor: '#000',
+  },
+  bodyRect: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: 'rgba(34,211,238,0.7)',
+    borderRadius: 16,
+    borderStyle: 'dashed',
   },
   busyOverlay: {
     ...StyleSheet.absoluteFillObject,

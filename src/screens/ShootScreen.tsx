@@ -39,6 +39,8 @@ const ZERO: MatchScores = {
   orientation: 0,
   expression: 0,
   gaze: 0,
+  body: 0,
+  hasBody: false,
   overall: 0,
 };
 
@@ -112,7 +114,8 @@ export default function ShootScreen() {
         s.framing >= MATCH_THRESHOLD &&
         s.orientation >= MATCH_THRESHOLD &&
         s.expression >= MATCH_THRESHOLD &&
-        s.gaze >= MATCH_THRESHOLD;
+        s.gaze >= MATCH_THRESHOLD &&
+        (!s.hasBody || s.body >= MATCH_THRESHOLD);
 
       // ── 자동 셔터: 4항목 모두 임계 이상을 HOLD 동안 유지 ──
       if (now >= cooldownUntil.value) {
@@ -157,6 +160,17 @@ export default function ShootScreen() {
     aspectRatio: 1,
   };
 
+  // 레퍼런스 상체 위치 가이드 (반신 셀카일 때)
+  const rb = referenceFeatures.body;
+  const bodyTarget = rb
+    ? {
+        left: `${((position === 'front' ? 1 - rb.cx : rb.cx) - rb.w / 2) * 100}%` as const,
+        top: `${(rb.cy - rb.h / 2) * 100}%` as const,
+        width: `${rb.w * 100}%` as const,
+        height: `${rb.h * 100}%` as const,
+      }
+    : null;
+
   return (
     <View style={styles.container}>
       <Camera
@@ -169,6 +183,11 @@ export default function ShootScreen() {
         pixelFormat="yuv"
       />
 
+      {/* 레퍼런스 상체 위치 가이드 (반신 셀카) */}
+      {bodyTarget && (
+        <View pointerEvents="none" style={[styles.bodyTarget, bodyTarget]} />
+      )}
+
       {/* 레퍼런스 얼굴 위치 가이드 */}
       <View pointerEvents="none" style={[styles.target, target, hasFace && styles.targetOn]} />
 
@@ -177,12 +196,13 @@ export default function ShootScreen() {
         <Text style={styles.guideText}>{guide}</Text>
       </View>
 
-      {/* 4분할 일치율 */}
+      {/* 일치율 (반신이면 자세 포함 5분할) */}
       <View pointerEvents="none" style={styles.bars}>
         <Bar label="구도" v={scores.framing} />
         <Bar label="각도" v={scores.orientation} />
         <Bar label="표정" v={scores.expression} />
         <Bar label="시선" v={scores.gaze} />
+        {scores.hasBody && <Bar label="자세" v={scores.body} />}
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
@@ -236,6 +256,13 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   targetOn: { borderColor: 'rgba(0,224,138,0.9)' },
+  bodyTarget: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.35)',
+    borderRadius: 24,
+    borderStyle: 'dashed',
+  },
   guideWrap: {
     position: 'absolute',
     top: 120,
