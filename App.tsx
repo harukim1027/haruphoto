@@ -7,12 +7,12 @@ import ReferencePickScreen from './src/screens/ReferencePickScreen';
 import ShootScreen from './src/screens/ShootScreen';
 import CompareScreen from './src/screens/CompareScreen';
 import FaceVisionSpikeScreen from './src/face/FaceVisionSpikeScreen';
-import type { PoseArray } from './src/types';
+import type { FaceFeatures } from './src/face/types';
 
 export type RootStackParamList = {
   Home: undefined;
   ReferencePick: undefined;
-  Shoot: { referenceUri: string; referencePose: PoseArray };
+  Shoot: { referenceUri: string; referenceFeatures: FaceFeatures };
   Compare: {
     referenceUri: string;
     shotUri: string;

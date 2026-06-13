@@ -4,58 +4,62 @@ import {
   Camera,
   useCameraDevice,
   useCameraPermission,
-  useSkiaFrameProcessor,
+  useFrameProcessor,
+  VisionCameraProxy,
+  type CameraPosition,
 } from 'react-native-vision-camera';
-import { useResizePlugin } from 'vision-camera-resize-plugin';
-import { PaintStyle, Skia } from '@shopify/react-native-skia';
 import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
-import { MIN_CONFIDENCE, POSE_EDGES } from '../pose/skeleton';
-import { useMovenetModel } from '../pose/useMovenetModel';
+import { toFaceFeatures, type FaceVisionResult } from '../face/types';
 import {
+  matchFace,
+  MATCH_THRESHOLD,
   SHUTTER_COOLDOWN_MS,
   SHUTTER_HOLD_MS,
-  SHUTTER_THRESHOLD,
-  normalizePose,
-  poseSimilarity,
-} from '../pose/matchPose';
+  type MatchScores,
+} from '../face/matchFace';
+import { guideText } from '../face/guide';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
 type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
-const MODEL_INPUT_SIZE = 192;
+const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
+
+function detectFace(frame: Parameters<Parameters<typeof useFrameProcessor>[0]>[0]) {
+  'worklet';
+  if (facePlugin == null) throw new Error('detectFace 네이티브 플러그인 없음');
+  return facePlugin.call(frame) as unknown as FaceVisionResult;
+}
+
+const ZERO: MatchScores = {
+  framing: 0,
+  orientation: 0,
+  expression: 0,
+  gaze: 0,
+  overall: 0,
+};
 
 export default function ShootScreen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Rt>();
-  const { referenceUri, referencePose } = route.params;
+  const { referenceUri, referenceFeatures } = route.params;
 
-  const device = useCameraDevice('back');
+  const [position, setPosition] = useState<CameraPosition>('front'); // 전면 기본
+  const device = useCameraDevice(position);
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef<Camera>(null);
 
-  const [matchPct, setMatchPct] = useState<number | null>(null);
+  const [scores, setScores] = useState<MatchScores>(ZERO);
+  const [guide, setGuide] = useState('얼굴을 화면에 맞춰주세요');
+  const [hasFace, setHasFace] = useState(false);
   const [capturing, setCapturing] = useState(false);
 
-  const plugin = useMovenetModel();
-  const model = plugin.state === 'loaded' ? plugin.model : undefined;
-  const { resize } = useResizePlugin();
-
-  // 레퍼런스 포즈는 미리 정규화해서 워크릿에 캡처
-  const normalizedRef = normalizePose(referencePose);
-
-  // 자동 셔터 상태 (워크릿 내부 추적)
-  const highSinceTs = useSharedValue(0);
+  const highSince = useSharedValue(0);
   const cooldownUntil = useSharedValue(0);
-  const lastUiReportTs = useSharedValue(0);
-
-  const reportMatch = Worklets.createRunOnJS((pct: number) =>
-    setMatchPct(pct),
-  );
-  const triggerShutter = Worklets.createRunOnJS(() => capture());
+  const lastReport = useSharedValue(0);
 
   useEffect(() => {
     if (!hasPermission) requestPermission();
@@ -66,11 +70,10 @@ export default function ShootScreen() {
     setCapturing(true);
     try {
       const photo = await cameraRef.current.takePhoto();
-      const shotUri = `file://${photo.path}`;
       navigation.replace('Compare', {
         referenceUri,
-        shotUri,
-        matchScore: (matchPct ?? 0) / 100,
+        shotUri: `file://${photo.path}`,
+        matchScore: scores.overall,
         fromHistory: false,
       });
     } catch (e) {
@@ -79,93 +82,59 @@ export default function ShootScreen() {
     }
   };
 
-  const frameProcessor = useSkiaFrameProcessor(
+  const report = Worklets.createRunOnJS(
+    (s: MatchScores, g: string, face: boolean) => {
+      setHasFace(face);
+      setScores(face ? s : ZERO);
+      setGuide(g);
+    },
+  );
+  const triggerShutter = Worklets.createRunOnJS(() => capture());
+
+  const frameProcessor = useFrameProcessor(
     (frame) => {
       'worklet';
-      frame.render();
-      if (model == null) return;
+      const raw = detectFace(frame);
+      const live = toFaceFeatures(raw);
+      const now = Date.now();
 
-      // ── 레퍼런스 스켈레톤 (반투명 가이드) ──
-      const guidePaint = Skia.Paint();
-      guidePaint.setColor(Skia.Color('rgba(255,255,255,0.45)'));
-      guidePaint.setStyle(PaintStyle.Stroke);
-      guidePaint.setStrokeWidth(5);
-
-      for (const [a, b] of POSE_EDGES) {
-        if (
-          referencePose[a * 3 + 2] < MIN_CONFIDENCE ||
-          referencePose[b * 3 + 2] < MIN_CONFIDENCE
-        ) {
-          continue;
+      if (live == null) {
+        highSince.value = 0;
+        if (now - lastReport.value > 150) {
+          lastReport.value = now;
+          report(ZERO, '얼굴이 보이지 않아요', false);
         }
-        frame.drawLine(
-          referencePose[a * 3 + 1] * frame.width,
-          referencePose[a * 3] * frame.height,
-          referencePose[b * 3 + 1] * frame.width,
-          referencePose[b * 3] * frame.height,
-          guidePaint,
-        );
-      }
-
-      // ── 실시간 포즈 추정 ──
-      const input = resize(frame, {
-        scale: { width: MODEL_INPUT_SIZE, height: MODEL_INPUT_SIZE },
-        pixelFormat: 'rgb',
-        dataType: 'uint8',
-      });
-      const outputs = model.runSync([input]);
-      const kp = outputs[0];
-
-      // 내 스켈레톤 (초록)
-      const livePaint = Skia.Paint();
-      livePaint.setColor(Skia.Color('#00E08A'));
-      livePaint.setStyle(PaintStyle.Stroke);
-      livePaint.setStrokeWidth(4);
-
-      for (const [a, b] of POSE_EDGES) {
-        const sa = Number(kp[a * 3 + 2]);
-        const sb = Number(kp[b * 3 + 2]);
-        if (sa < MIN_CONFIDENCE || sb < MIN_CONFIDENCE) continue;
-        frame.drawLine(
-          Number(kp[a * 3 + 1]) * frame.width,
-          Number(kp[a * 3]) * frame.height,
-          Number(kp[b * 3 + 1]) * frame.width,
-          Number(kp[b * 3]) * frame.height,
-          livePaint,
-        );
-      }
-
-      // ── 일치율 계산 ──
-      if (normalizedRef == null) return;
-      const normalizedLive = normalizePose(kp);
-      if (normalizedLive == null) {
-        highSinceTs.value = 0;
         return;
       }
 
-      const score = poseSimilarity(normalizedRef, normalizedLive);
-      const now = Date.now();
+      const s = matchFace(referenceFeatures, live);
+      const allGood =
+        s.framing >= MATCH_THRESHOLD &&
+        s.orientation >= MATCH_THRESHOLD &&
+        s.expression >= MATCH_THRESHOLD &&
+        s.gaze >= MATCH_THRESHOLD;
 
-      // UI 갱신은 150ms 간격으로 (runOnJS 폭주 방지)
-      if (score >= 0 && now - lastUiReportTs.value > 150) {
-        lastUiReportTs.value = now;
-        reportMatch(Math.round(score * 100));
+      // ── 자동 셔터: 4항목 모두 임계 이상을 HOLD 동안 유지 ──
+      if (now >= cooldownUntil.value) {
+        if (allGood) {
+          if (highSince.value === 0) highSince.value = now;
+          if (now - highSince.value >= SHUTTER_HOLD_MS) {
+            highSince.value = 0;
+            cooldownUntil.value = now + SHUTTER_COOLDOWN_MS;
+            triggerShutter();
+          }
+        } else {
+          highSince.value = 0;
+        }
       }
 
-      // ── 자동 셔터: 임계치 이상을 SHUTTER_HOLD_MS 유지하면 발동 ──
-      if (now < cooldownUntil.value) return;
-      if (score >= SHUTTER_THRESHOLD) {
-        if (highSinceTs.value === 0) highSinceTs.value = now;
-        if (now - highSinceTs.value >= SHUTTER_HOLD_MS) {
-          highSinceTs.value = 0;
-          cooldownUntil.value = now + SHUTTER_COOLDOWN_MS;
-          triggerShutter();
-        }
-      } else {
-        highSinceTs.value = 0;
+      if (now - lastReport.value > 150) {
+        lastReport.value = now;
+        const g = allGood ? '완벽해요! 그대로!' : guideText(referenceFeatures, live, s);
+        report(s, g, true);
       }
     },
-    [model, referencePose, normalizedRef],
+    [referenceFeatures, report, triggerShutter],
   );
 
   if (!hasPermission || device == null) {
@@ -178,7 +147,15 @@ export default function ShootScreen() {
     );
   }
 
-  const matched = matchPct != null && matchPct >= SHUTTER_THRESHOLD * 100;
+  // 레퍼런스 얼굴 위치 가이드 타원 (전면은 미러라 x 반전)
+  const targetX =
+    position === 'front' ? 1 - referenceFeatures.framing.cx : referenceFeatures.framing.cx;
+  const target = {
+    left: `${(targetX - referenceFeatures.framing.size / 2) * 100}%` as const,
+    top: `${(referenceFeatures.framing.cy - referenceFeatures.framing.size / 2) * 100}%` as const,
+    width: `${referenceFeatures.framing.size * 100}%` as const,
+    aspectRatio: 1,
+  };
 
   return (
     <View style={styles.container}>
@@ -192,18 +169,53 @@ export default function ShootScreen() {
         pixelFormat="yuv"
       />
 
-      {/* 일치율 HUD */}
-      <View style={[styles.hud, matched && styles.hudMatched]}>
-        <Text style={[styles.hudText, matched && styles.hudTextMatched]}>
-          {matchPct == null ? '포즈를 잡는 중…' : `일치율 ${matchPct}%`}
-        </Text>
-        {matched && <Text style={styles.hudSub}>그대로! 곧 찍혀요</Text>}
+      {/* 레퍼런스 얼굴 위치 가이드 */}
+      <View pointerEvents="none" style={[styles.target, target, hasFace && styles.targetOn]} />
+
+      {/* ── 핵심: 큰 가이드 문구 ── */}
+      <View pointerEvents="none" style={styles.guideWrap}>
+        <Text style={styles.guideText}>{guide}</Text>
       </View>
+
+      {/* 4분할 일치율 */}
+      <View pointerEvents="none" style={styles.bars}>
+        <Bar label="구도" v={scores.framing} />
+        <Bar label="각도" v={scores.orientation} />
+        <Bar label="표정" v={scores.expression} />
+        <Bar label="시선" v={scores.gaze} />
+        <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
+      </View>
+
+      {/* 전/후면 토글 */}
+      <Pressable
+        style={styles.flip}
+        onPress={() => setPosition((p) => (p === 'front' ? 'back' : 'front'))}
+      >
+        <Text style={styles.flipText}>{position === 'front' ? '후면' : '전면'}</Text>
+      </Pressable>
 
       {/* 수동 셔터 (백업) */}
       <Pressable style={styles.shutter} onPress={capture} disabled={capturing}>
         <View style={styles.shutterInner} />
       </Pressable>
+    </View>
+  );
+}
+
+function Bar({ label, v }: { label: string; v: number }) {
+  const ok = v >= MATCH_THRESHOLD;
+  return (
+    <View style={styles.barRow}>
+      <Text style={styles.barLabel}>{label}</Text>
+      <View style={styles.barTrack}>
+        <View
+          style={[
+            styles.barFill,
+            { width: `${Math.round(v * 100)}%`, backgroundColor: ok ? '#00E08A' : '#FFB020' },
+          ]}
+        />
+      </View>
+      <Text style={styles.barPct}>{Math.round(v * 100)}</Text>
     </View>
   );
 }
@@ -217,20 +229,63 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   centerText: { color: '#fff', fontSize: 16 },
-  hud: {
+  target: {
     position: 'absolute',
-    top: 60,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    borderWidth: 3,
+    borderColor: 'rgba(255,255,255,0.5)',
+    borderRadius: 999,
+  },
+  targetOn: { borderColor: 'rgba(0,224,138,0.9)' },
+  guideWrap: {
+    position: 'absolute',
+    top: 120,
+    left: 0,
+    right: 0,
     alignItems: 'center',
   },
-  hudMatched: { backgroundColor: 'rgba(0,224,138,0.85)' },
-  hudText: { color: '#FFF', fontSize: 18, fontWeight: '700' },
-  hudTextMatched: { color: '#0D0D0F' },
-  hudSub: { color: '#0D0D0F', fontSize: 12, marginTop: 2 },
+  guideText: {
+    color: '#FFF',
+    fontSize: 26,
+    fontWeight: '800',
+    textAlign: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
+  bars: {
+    position: 'absolute',
+    bottom: 130,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+  },
+  barRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  barLabel: { color: '#FFF', fontSize: 13, width: 32 },
+  barTrack: {
+    flex: 1,
+    height: 8,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  barFill: { height: 8, borderRadius: 4 },
+  barPct: { color: '#FFF', fontSize: 12, width: 26, textAlign: 'right' },
+  overall: { color: '#00E08A', fontSize: 14, fontWeight: '700', marginTop: 4 },
+  flip: {
+    position: 'absolute',
+    bottom: 56,
+    right: 28,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 22,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  flipText: { color: '#FFF', fontSize: 14, fontWeight: '600' },
   shutter: {
     position: 'absolute',
     bottom: 44,
@@ -243,10 +298,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  shutterInner: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#FFF',
-  },
+  shutterInner: { width: 56, height: 56, borderRadius: 28, backgroundColor: '#FFF' },
 });

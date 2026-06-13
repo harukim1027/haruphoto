@@ -14,7 +14,14 @@ const fs = require('fs');
 const path = require('path');
 
 const MARKER = '# HARU_BUILD_FIXES';
-const NATIVE_FILES = ['FaceVisionPlugin.swift', 'FaceVisionPlugin.m'];
+const NATIVE_FILES = [
+  'FaceVisionPlugin.swift',
+  'FaceVisionPlugin.m',
+  'FaceVisionModule.swift',
+  'FaceVisionModule.m',
+];
+// Swift 가 RCTPromiseResolveBlock 등 React 타입을 보도록 브리징 헤더에 추가
+const BRIDGE_IMPORT = '#import <React/RCTBridgeModule.h>';
 
 const FMT_PATCH_RUBY = `
     ${MARKER}: Xcode 26+ clang rejects fmt 11 consteval format strings.
@@ -83,8 +90,30 @@ const withNativeSources = (config) =>
     return cfg;
   });
 
+// React 헤더를 브리징 헤더에 주입 (Swift 의 RCTPromiseResolveBlock 용)
+const withBridgingHeader = (config) =>
+  withDangerousMod(config, [
+    'ios',
+    (cfg) => {
+      const { platformProjectRoot, projectName } = cfg.modRequest;
+      const bridge = path.join(
+        platformProjectRoot,
+        projectName,
+        `${projectName}-Bridging-Header.h`,
+      );
+      if (fs.existsSync(bridge)) {
+        let txt = fs.readFileSync(bridge, 'utf8');
+        if (!txt.includes(BRIDGE_IMPORT)) {
+          fs.writeFileSync(bridge, `${txt.trimEnd()}\n${BRIDGE_IMPORT}\n`);
+        }
+      }
+      return cfg;
+    },
+  ]);
+
 module.exports = function withBuildFixes(config) {
   config = withFmtFix(config);
+  config = withBridgingHeader(config);
   config = withCopyNative(config);
   config = withNativeSources(config);
   return config;

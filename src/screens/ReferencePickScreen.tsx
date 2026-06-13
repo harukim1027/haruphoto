@@ -11,10 +11,8 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { extractPoseFromImage } from '../pose/extractPose';
-import { useMovenetModel } from '../pose/useMovenetModel';
-import SkeletonOverlay from '../components/SkeletonOverlay';
-import type { PoseArray } from '../types';
+import { extractFaceFromImage } from '../face/extractFaceFromImage';
+import type { FaceFeatures } from '../face/types';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ReferencePick'>;
@@ -25,10 +23,8 @@ export default function ReferencePickScreen() {
   const previewW = width - 40;
   const previewH = (previewW * 4) / 3;
 
-  const plugin = useMovenetModel();
-
   const [uri, setUri] = useState<string | null>(null);
-  const [pose, setPose] = useState<PoseArray | null>(null);
+  const [features, setFeatures] = useState<FaceFeatures | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,34 +38,39 @@ export default function ReferencePickScreen() {
 
     const asset = result.assets[0];
     setUri(asset.uri);
-    setPose(null);
-
-    if (plugin.state !== 'loaded') {
-      setError('포즈 모델이 아직 준비되지 않았어요. 잠시 후 다시 시도해주세요.');
-      return;
-    }
-
+    setFeatures(null);
     setBusy(true);
     try {
-      const extracted = await extractPoseFromImage(asset.uri, plugin.model);
-      if (extracted == null) {
-        setError('이 사진에서 사람 포즈를 찾지 못했어요. 전신이나 반신이 나온 사진으로 시도해보세요.');
+      const f = await extractFaceFromImage(asset.uri);
+      if (f == null) {
+        setError('이 사진에서 얼굴을 찾지 못했어요. 얼굴이 또렷한 셀카/상반신 사진으로 시도해보세요.');
       } else {
-        setPose(extracted);
+        setFeatures(f);
       }
     } catch (e) {
-      setError('포즈 추출 중 문제가 생겼어요. 다른 사진으로 시도해보세요.');
+      setError('얼굴 분석 중 문제가 생겼어요. 다른 사진으로 시도해보세요.');
       console.error(e);
     } finally {
       setBusy(false);
     }
   };
 
+  // 검출된 얼굴 위치 표시용 (preview 좌표)
+  const faceMarker =
+    features != null
+      ? {
+          left: features.framing.cx * previewW - (features.framing.size * previewW) / 2,
+          top: features.framing.cy * previewH - (features.framing.size * previewH) / 2,
+          width: features.framing.size * previewW,
+          height: features.framing.size * previewH,
+        }
+      : null;
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>레퍼런스 고르기</Text>
       <Text style={styles.desc}>
-        따라 찍고 싶은 사진을 골라주세요. 전신/반신 인물 사진일수록 잘 잡혀요.
+        따라 찍고 싶은 사진을 골라주세요. 얼굴이 또렷한 셀카/상반신 사진일수록 잘 잡혀요.
       </Text>
 
       <Pressable
@@ -78,18 +79,8 @@ export default function ReferencePickScreen() {
       >
         {uri ? (
           <>
-            <Image
-              source={{ uri }}
-              style={StyleSheet.absoluteFill}
-              resizeMode="cover"
-            />
-            {pose && (
-              <SkeletonOverlay
-                pose={pose}
-                width={previewW}
-                height={previewH}
-              />
-            )}
+            <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+            {faceMarker && <View style={[styles.faceBox, faceMarker]} />}
           </>
         ) : (
           <Text style={styles.previewHint}>탭해서 사진 선택</Text>
@@ -97,11 +88,12 @@ export default function ReferencePickScreen() {
         {busy && (
           <View style={styles.busyOverlay}>
             <ActivityIndicator color="#00E08A" size="large" />
-            <Text style={styles.busyText}>포즈 분석 중…</Text>
+            <Text style={styles.busyText}>얼굴 분석 중…</Text>
           </View>
         )}
       </Pressable>
 
+      {features && !error && <Text style={styles.ok}>✓ 얼굴을 인식했어요</Text>}
       {error && <Text style={styles.error}>{error}</Text>}
 
       <View style={styles.actions}>
@@ -111,15 +103,18 @@ export default function ReferencePickScreen() {
           </Pressable>
         )}
         <Pressable
-          style={[styles.primary, !pose && styles.disabled]}
-          disabled={!pose || !uri}
+          style={[styles.primary, !features && styles.disabled]}
+          disabled={!features || !uri}
           onPress={() =>
             uri &&
-            pose &&
-            navigation.navigate('Shoot', { referenceUri: uri, referencePose: pose })
+            features &&
+            navigation.navigate('Shoot', {
+              referenceUri: uri,
+              referenceFeatures: features,
+            })
           }
         >
-          <Text style={styles.primaryText}>이 포즈로 촬영</Text>
+          <Text style={styles.primaryText}>이 얼굴로 촬영</Text>
         </Pressable>
       </View>
     </View>
@@ -138,6 +133,12 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   previewHint: { color: '#55555E', fontSize: 15 },
+  faceBox: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: '#00E08A',
+    borderRadius: 999,
+  },
   busyOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -146,6 +147,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   busyText: { color: '#FFF', fontSize: 13 },
+  ok: { color: '#00E08A', fontSize: 13, marginTop: 12 },
   error: { color: '#FF6B6B', fontSize: 13, marginTop: 12 },
   actions: { flexDirection: 'row', gap: 10, marginTop: 'auto', marginBottom: 24 },
   primary: {
