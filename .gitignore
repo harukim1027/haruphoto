@@ -1,7 +1,8 @@
-# deps / build
+# deps / build (prebuild로 생성되는 루트 네이티브 프로젝트만 무시.
+# 로컬 Expo 모듈의 modules/*/ios 소스는 커밋해야 하므로 루트 앵커(/) 사용)
 node_modules/
-ios/
-android/
+/ios/
+/android/
 .expo/
 dist/
 
