@@ -8,6 +8,8 @@ import { toFaceFeatures, type FaceFeatures, type FaceVisionResult } from './type
 export async function extractFaceFromImage(
   uri: string,
 ): Promise<FaceFeatures | null> {
-  const result = (await getFaceVision().detectOnImage(uri)) as FaceVisionResult;
+  const result = (await getFaceVision().detectOnImage(
+    uri,
+  )) as unknown as FaceVisionResult;
   return toFaceFeatures(result);
 }

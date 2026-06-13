@@ -81,10 +81,31 @@ export default function ShootScreen() {
   const { width: W, height: H } = useWindowDimensions();
 
   const [position, setPosition] = useState<CameraPosition>('front'); // 전면 기본
-  const device = useCameraDevice(position);
+  // 멀티렌즈(초광각·광각·망원) 가상 디바이스 — 줌으로 렌즈 자동 전환
+  const device = useCameraDevice(position, {
+    physicalDevices: [
+      'ultra-wide-angle-camera',
+      'wide-angle-camera',
+      'telephoto-camera',
+    ],
+  });
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef<Camera>(null);
   const front = position === 'front';
+
+  // 줌(렌즈) — 기기에 있는 배율만 노출
+  const neutral = device?.neutralZoom ?? 1;
+  const [zoom, setZoom] = useState(neutral);
+  useEffect(() => {
+    setZoom(device?.neutralZoom ?? 1); // 디바이스/전후면 바뀌면 1x로 리셋
+  }, [device?.neutralZoom, position]);
+
+  const zoomPresets = device
+    ? [0.5, 0.6, 0.8, 1, 1.5, 2].filter((m) => {
+        const z = neutral * m;
+        return z >= device.minZoom - 1e-3 && z <= device.maxZoom + 1e-3;
+      })
+    : [];
 
   const [scores, setScores] = useState<MatchScores>(ZERO);
   const [guide, setGuide] = useState('상체가 보이게 서주세요');
@@ -207,6 +228,7 @@ export default function ShootScreen() {
         photo
         frameProcessor={frameProcessor}
         pixelFormat="yuv"
+        zoom={zoom}
       />
 
       {/* 목표 자세 (반투명 흰색) */}
@@ -235,6 +257,26 @@ export default function ShootScreen() {
         <Bar label="시선" v={scores.gaze} />
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
+
+      {/* 줌/렌즈 프리셋 (기기에 있는 배율만) */}
+      {zoomPresets.length > 1 && (
+        <View style={styles.zoomRow}>
+          {zoomPresets.map((m) => {
+            const active = Math.abs(zoom - neutral * m) < neutral * 0.04;
+            return (
+              <Pressable
+                key={m}
+                style={[styles.zoomBtn, active && styles.zoomBtnOn]}
+                onPress={() => setZoom(neutral * m)}
+              >
+                <Text style={[styles.zoomText, active && styles.zoomTextOn]}>
+                  {active ? `${m}×` : m}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
 
       {/* 전/후면 토글 */}
       <Pressable
@@ -307,7 +349,7 @@ const styles = StyleSheet.create({
   },
   bars: {
     position: 'absolute',
-    bottom: 130,
+    bottom: 180,
     left: 20,
     right: 20,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -339,6 +381,26 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   flipText: { color: '#FFF', fontSize: 14, fontWeight: '600' },
+  zoomRow: {
+    position: 'absolute',
+    bottom: 126,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  zoomBtn: {
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 16,
+    minWidth: 38,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  zoomBtnOn: { backgroundColor: '#FFD400' },
+  zoomText: { color: '#FFF', fontSize: 13, fontWeight: '600' },
+  zoomTextOn: { color: '#0D0D0F', fontSize: 13, fontWeight: '800' },
   shutter: {
     position: 'absolute',
     bottom: 44,
