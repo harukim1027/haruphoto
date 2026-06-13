@@ -18,7 +18,7 @@ import {
   type PoseJoints,
   type Pt,
 } from '../face/types';
-import PoseSkeleton from '../components/PoseSkeleton';
+import Silhouette from '../components/Silhouette';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ReferencePick'>;
@@ -83,6 +83,11 @@ export default function ReferencePickScreen() {
     }
   }
   const hasPose = Object.keys(poseScreen).length > 0;
+  // 얼굴 외곽 윤곽선 — cover 매핑
+  const faceContourScreen =
+    features?.faceContour && img && features.faceContour.length >= 3
+      ? features.faceContour.map((p) => mapCover(p.x, p.y, img.w, img.h, previewW, previewH))
+      : undefined;
 
   return (
     <View style={styles.container}>
@@ -98,7 +103,14 @@ export default function ReferencePickScreen() {
         {uri ? (
           <>
             <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-            {hasPose && <PoseSkeleton joints={poseScreen} color="#22D3EE" width={4} />}
+            {(hasPose || faceContourScreen) && (
+              <Silhouette
+                faceContour={faceContourScreen}
+                joints={poseScreen}
+                color="#22D3EE"
+                width={3}
+              />
+            )}
             {dots.map(
               (d) =>
                 d.p && (

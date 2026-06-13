@@ -1,0 +1,78 @@
+import React, { useMemo } from 'react';
+import { Canvas, Path, Skia } from '@shopify/react-native-skia';
+import { StyleSheet } from 'react-native';
+import type { PoseJoints, Pt } from '../face/types';
+
+type ScreenJoints = Partial<Record<keyof PoseJoints, Pt>>;
+
+/** 점들을 닫힌 path 로 (얼굴 외곽). 점 3개 미만이면 null. */
+function closedPath(pts?: Pt[]) {
+  if (!pts || pts.length < 3) return null;
+  const p = Skia.Path.Make();
+  p.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i].x, pts[i].y);
+  p.close();
+  return p;
+}
+
+/** 관절을 순서대로 이은 열린 path (상체 외곽: 손목-팔꿈치-어깨-목-어깨-팔꿈치-손목). */
+function bodyPath(j: ScreenJoints) {
+  const order: (keyof PoseJoints)[] = [
+    'leftWrist',
+    'leftElbow',
+    'leftShoulder',
+    'neck',
+    'rightShoulder',
+    'rightElbow',
+    'rightWrist',
+  ];
+  const seq = order.map((k) => j[k]).filter(Boolean) as Pt[];
+  if (seq.length < 2) return null;
+  const p = Skia.Path.Make();
+  p.moveTo(seq[0].x, seq[0].y);
+  for (let i = 1; i < seq.length; i++) p.lineTo(seq[i].x, seq[i].y);
+  return p;
+}
+
+/**
+ * 얼굴 외곽 윤곽선 + 상체 외곽선을 화면 좌표로 그린다.
+ * face/joints 는 이미 화면 픽셀로 매핑된 좌표. 데이터 없으면 아무것도 안 그림.
+ */
+export default function Silhouette({
+  faceContour,
+  joints,
+  color,
+  width = 3,
+}: {
+  faceContour?: Pt[];
+  joints?: ScreenJoints;
+  color: string;
+  width?: number;
+}) {
+  const face = useMemo(() => closedPath(faceContour), [faceContour]);
+  const body = useMemo(() => (joints ? bodyPath(joints) : null), [joints]);
+  if (!face && !body) return null;
+  return (
+    <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+      {face && (
+        <Path
+          path={face}
+          style="stroke"
+          color={color}
+          strokeWidth={width}
+          strokeJoin="round"
+        />
+      )}
+      {body && (
+        <Path
+          path={body}
+          style="stroke"
+          color={color}
+          strokeWidth={width}
+          strokeCap="round"
+          strokeJoin="round"
+        />
+      )}
+    </Canvas>
+  );
+}

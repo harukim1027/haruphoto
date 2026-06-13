@@ -104,7 +104,21 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     let g2 = gaze(pupil: lm.rightPupil, eye: lm.rightEye)
     out["gazeX"] = (g.x + g2.x) / 2.0
     out["gazeY"] = (g.y + g2.y) / 2.0
+
+    // ── 얼굴 외곽 윤곽선 (faceContour, top-left 정규화 [x,y] 배열) ──
+    if let fc = contourPoints(lm.faceContour, bb: bb) { out["faceContour"] = fc }
     return out
+  }
+
+  /// 랜드마크 region 의 모든 점 → top-left 정규화 이미지 좌표 [[x,y],...]
+  static func contourPoints(_ region: VNFaceLandmarkRegion2D?, bb: CGRect) -> [[Double]]? {
+    guard let pts = region?.normalizedPoints, pts.count >= 3 else { return nil }
+    return pts.map { p in
+      [
+        Double(bb.minX) + Double(p.x) * Double(bb.width),
+        1.0 - (Double(bb.minY) + Double(p.y) * Double(bb.height)),
+      ]
+    }
   }
 
   // MARK: - 기하 헬퍼 (landmark 점들은 boundingBox 기준 0~1)

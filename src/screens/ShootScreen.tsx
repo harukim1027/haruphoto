@@ -34,7 +34,7 @@ import {
   type MatchScores,
 } from '../face/matchFace';
 import { guideText } from '../face/guide';
-import PoseSkeleton from '../components/PoseSkeleton';
+import Silhouette from '../components/Silhouette';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -42,7 +42,7 @@ type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 
-const ZOOM_PRESETS = [0.5, 0.6, 0.9, 1, 1.5, 2];
+const ZOOM_PRESETS = [0.5, 0.6, 0.8, 0.9, 1, 1.5, 2];
 const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
 function displayToZoom(d: number, dev: CameraDevice): number {
   const z =
@@ -74,12 +74,30 @@ const ZERO: MatchScores = {
 
 interface LiveData {
   pose?: PoseJoints; // un-mirror 보정됨 (프리뷰 사용자 몸 위치에 일치)
+  faceContour?: Pt[]; // un-mirror 보정된 얼굴 외곽
   cx: number;
   cy: number;
   size: number;
   poseCount: number;
   fw: number;
   fh: number;
+}
+
+// 정규화 top-left 점들 → 화면 좌표 (cover crop 보정).
+function toScreenContour(
+  pts: Pt[] | undefined,
+  imgW: number,
+  imgH: number,
+  contW: number,
+  contH: number,
+): Pt[] | undefined {
+  if (!pts || pts.length < 3 || imgW <= 0 || imgH <= 0) return undefined;
+  const scale = Math.max(contW / imgW, contH / imgH);
+  const dW = imgW * scale;
+  const dH = imgH * scale;
+  const offX = (contW - dW) / 2;
+  const offY = (contH - dH) / 2;
+  return pts.map((p) => ({ x: offX + p.x * dW, y: offY + p.y * dH }));
 }
 
 // 관절(정규화) → 화면 좌표. cover crop 보정 + (전면이면 toFaceFeatures가 이미 un-mirror).
@@ -240,6 +258,7 @@ export default function ShootScreen() {
         const pc = lf.pose ? Object.keys(lf.pose).length : 0;
         report(s, g, true, {
           pose: lf.pose,
+          faceContour: lf.faceContour,
           cx: lf.framing.cx,
           cy: lf.framing.cy,
           size: lf.framing.size,
@@ -270,6 +289,16 @@ export default function ShootScreen() {
   const liveH = live ? Math.max(live.fw, live.fh) : H;
   const targetJoints = toScreenJoints(refPose, refImg.w, refImg.h, W, H);
   const liveJoints = toScreenJoints(live?.pose, liveW, liveH, W, H);
+  const targetFace = toScreenContour(
+    referenceFeatures.faceContour,
+    refImg.w,
+    refImg.h,
+    W,
+    H,
+  );
+  const liveFace = toScreenContour(live?.faceContour, liveW, liveH, W, H);
+  const hasTarget = targetFace || Object.keys(targetJoints).length > 0;
+  const hasLive = liveFace || Object.keys(liveJoints).length > 0;
 
   return (
     <View style={styles.container}>
@@ -286,13 +315,23 @@ export default function ShootScreen() {
         />
       </GestureDetector>
 
-      {/* 목표 자세(레퍼런스): 흰색 */}
-      {Object.keys(targetJoints).length > 0 && (
-        <PoseSkeleton joints={targetJoints} color="rgba(255,255,255,0.65)" width={8} />
+      {/* 목표 윤곽(레퍼런스): 흰색 반투명 */}
+      {hasTarget && (
+        <Silhouette
+          faceContour={targetFace}
+          joints={targetJoints}
+          color="rgba(255,255,255,0.7)"
+          width={4}
+        />
       )}
-      {/* 내 실시간 자세: 초록 */}
-      {Object.keys(liveJoints).length > 0 && (
-        <PoseSkeleton joints={liveJoints} color="#00E08A" width={5} />
+      {/* 내 실시간 윤곽: 초록 (얼굴/포즈 데이터 있을 때만) */}
+      {hasLive && (
+        <Silhouette
+          faceContour={liveFace}
+          joints={liveJoints}
+          color="#00E08A"
+          width={3}
+        />
       )}
 
       <View pointerEvents="none" style={styles.guideWrap}>
@@ -311,7 +350,8 @@ export default function ShootScreen() {
             {'\n'}lenses=[{device.physicalDevices.join(',')}]
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
             {'\n'}live face cx{live?.cx.toFixed(2) ?? '-'} cy{live?.cy.toFixed(2) ?? '-'} size
-            {live?.size.toFixed(2) ?? '-'} | 관절 {live?.poseCount ?? 0} | frame{' '}
+            {live?.size.toFixed(2) ?? '-'} | 관절 {live?.poseCount ?? 0} | 윤곽{' '}
+            {live?.faceContour?.length ?? 0} | frame{' '}
             {live ? `${live.fw}x${live.fh}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>

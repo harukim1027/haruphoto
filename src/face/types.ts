@@ -42,6 +42,7 @@ export interface FaceVisionResult {
   gazeX?: number;
   gazeY?: number;
   points?: { leftEye?: Pt; rightEye?: Pt; nose?: Pt; mouth?: Pt };
+  faceContour?: number[][]; // 얼굴 외곽 [x,y] (top-left 정규화)
   pose?: PoseJoints; // 상체 관절 (top-left 정규화)
 }
 
@@ -63,6 +64,7 @@ export interface FaceFeatures {
   imageSize?: { w: number; h: number };
   bbox?: { x: number; y: number; w: number; h: number };
   landmarks?: { leftEye?: Pt; rightEye?: Pt; nose?: Pt; mouth?: Pt };
+  faceContour?: Pt[]; // mirror 보정된 얼굴 외곽 윤곽선 (top-left 정규화)
 }
 
 // 전면(미러)일 때 관절 좌우 반전 + 좌/우 라벨 스왑
@@ -95,6 +97,9 @@ export function toFaceFeatures(r: FaceVisionResult): FaceFeatures | null {
       ? mirrorPose(r.pose)
       : r.pose
     : undefined;
+  const faceContour = r.faceContour
+    ? r.faceContour.map(([x, y]) => ({ x: r.mirrored ? 1 - x : x, y }))
+    : undefined;
 
   return {
     hasFace,
@@ -126,6 +131,7 @@ export function toFaceFeatures(r: FaceVisionResult): FaceFeatures | null {
         ? { x: r.bx, y: r.by ?? 0, w: r.bw ?? 0, h: r.bh ?? 0 }
         : undefined,
     landmarks: r.points,
+    faceContour,
   };
 }
 
