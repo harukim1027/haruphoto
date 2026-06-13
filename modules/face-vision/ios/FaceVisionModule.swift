@@ -21,15 +21,14 @@ public class FaceVisionModule: Module {
         return ["found": false, "err": "no_cgimage"]
       }
       let faceReq = VNDetectFaceLandmarksRequest()
-      let bodyReq = VNDetectHumanRectanglesRequest()
-      if #available(iOS 15.0, *) { bodyReq.upperBodyOnly = true }
+      let poseReq = VNDetectHumanBodyPoseRequest()
       let handler = VNImageRequestHandler(
         cgImage: cg,
         orientation: Self.cgOrientation(image.imageOrientation),
         options: [:]
       )
       do {
-        try handler.perform([faceReq, bodyReq])
+        try handler.perform([faceReq, poseReq])
       } catch {
         return ["found": false, "err": "vision_failed: \(error.localizedDescription)"]
       }
@@ -38,21 +37,39 @@ public class FaceVisionModule: Module {
       let isSide = (o == .left || o == .right || o == .leftMirrored || o == .rightMirrored)
       let upW = isSide ? cg.height : cg.width
       let upH = isSide ? cg.width : cg.height
+      let pose = Self.poseJoints(poseReq.results?.first)
       guard let face = faceReq.results?.first else {
+        // 얼굴이 없어도 상체 포즈가 있으면 반신으로 인정
+        if let pose = pose {
+          return ["found": true, "faceOnly": false, "noFace": true,
+                  "imgW": Double(upW), "imgH": Double(upH), "pose": pose]
+        }
         return ["found": false, "err": "no_face", "imgW": Double(upW), "imgH": Double(upH)]
       }
       var result = Self.features(from: face, imgW: upW, imgH: upH)
-      if let body = Self.bodyBox(bodyReq.results?.first) { result["body"] = body }
+      if let pose = pose { result["pose"] = pose }
       return result
     }
   }
 
-  /// 상체 박스 → top-left 정규화 dict
-  static func bodyBox(_ obs: VNHumanObservation?) -> [String: Double]? {
-    guard let b = obs, b.confidence > 0.3 else { return nil }
-    let bb = b.boundingBox
-    return ["x": Double(bb.minX), "y": Double(1.0 - bb.maxY),
-            "w": Double(bb.width), "h": Double(bb.height)]
+  /// 상체 관절(목/어깨/팔꿈치/손목/골반중심) → top-left 정규화 + 신뢰도
+  static func poseJoints(_ obs: VNHumanBodyPoseObservation?) -> [String: Any]? {
+    guard let body = obs else { return nil }
+    let names: [(String, VNHumanBodyPoseObservation.JointName)] = [
+      ("neck", .neck),
+      ("leftShoulder", .leftShoulder), ("rightShoulder", .rightShoulder),
+      ("leftElbow", .leftElbow), ("rightElbow", .rightElbow),
+      ("leftWrist", .leftWrist), ("rightWrist", .rightWrist),
+      ("root", .root),
+    ]
+    var out: [String: Any] = [:]
+    for (key, jn) in names {
+      if let p = try? body.recognizedPoint(jn), p.confidence > 0.1 {
+        out[key] = ["x": Double(p.location.x), "y": Double(1.0 - p.location.y),
+                    "c": Double(p.confidence)]
+      }
+    }
+    return out.isEmpty ? nil : out
   }
 
   // MARK: - Vision 추출 (FaceVisionPlugin 과 동일 로직, 정지이미지용)

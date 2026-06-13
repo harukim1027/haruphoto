@@ -1,30 +1,91 @@
-import type { FaceFeatures } from './types';
+import type { FaceFeatures, Joint, PoseJoints } from './types';
 
 export interface MatchScores {
-  framing: number; // 0~1
-  orientation: number;
+  pose: number; // 자세(상체) — 주력
+  framing: number;
   expression: number;
   gaze: number;
-  body: number; // 자세 (반신 셀카; 레퍼런스에 몸 없으면 항상 1)
-  hasBody: boolean; // 레퍼런스에 자세 항목이 있는지 (UI 표시 여부)
+  orientation: number;
+  hasPose: boolean;
   overall: number;
 }
 
-// 허용 오차 (실기기 실측으로 튜닝 가능)
 const TOL = {
-  pos: 0.12, // 구도 위치 거리(정규화)
-  size: 0.18, // 크기 비율 차
-  angle: 0.26, // 각도 차(radian, ~15°)
-  expr: 0.18, // 표정 계수 차
-  gaze: 0.22, // 시선 위치 차
-  bodyPos: 0.15, // 몸 중심 거리
-  bodySize: 0.25, // 몸 크기 비율 차
-  headOff: 0.12, // 머리-몸 상대 위치(기울기/돌림)
+  pos: 0.12,
+  size: 0.18,
+  angle: 0.26, // 고개 각도(radian)
+  expr: 0.18,
+  gaze: 0.22,
+  poseAngle: 0.45, // 상체 관절 각도 허용오차(radian, ~26°)
 };
 
 function score(diff: number, tol: number): number {
   'worklet';
   return Math.max(0, Math.min(1, 1 - diff / tol));
+}
+
+// 두 관절 사이 벡터 각도(radian). 신뢰도 낮거나 없으면 undefined.
+function ang(a?: Joint, b?: Joint): number | undefined {
+  'worklet';
+  if (!a || !b || a.c < 0.2 || b.c < 0.2) return undefined;
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+
+// 상체 자세를 각도 집합으로 (위치/크기 무관)
+export interface PoseAngles {
+  shoulder?: number; // 어깨선 기울기
+  leftUpper?: number; // 왼 어깨→팔꿈치
+  leftFore?: number; // 왼 팔꿈치→손목
+  rightUpper?: number;
+  rightFore?: number;
+  torso?: number; // 목→골반
+}
+
+export function poseAngles(p?: PoseJoints): PoseAngles {
+  'worklet';
+  if (!p) return {};
+  return {
+    shoulder: ang(p.leftShoulder, p.rightShoulder),
+    leftUpper: ang(p.leftShoulder, p.leftElbow),
+    leftFore: ang(p.leftElbow, p.leftWrist),
+    rightUpper: ang(p.rightShoulder, p.rightElbow),
+    rightFore: ang(p.rightElbow, p.rightWrist),
+    torso: ang(p.root, p.neck),
+  };
+}
+
+function angDiff(a?: number, b?: number): number | undefined {
+  'worklet';
+  if (a == null || b == null) return undefined;
+  let d = Math.abs(a - b) % (2 * Math.PI);
+  if (d > Math.PI) d = 2 * Math.PI - d;
+  return d;
+}
+
+// 두 포즈의 각도 일치율 (공통으로 잡힌 각도만 평균)
+export function matchPose(ref?: PoseJoints, live?: PoseJoints): number {
+  'worklet';
+  if (!ref || !live) return 0;
+  const ra = poseAngles(ref);
+  const la = poseAngles(live);
+  const keys: (keyof PoseAngles)[] = [
+    'shoulder',
+    'leftUpper',
+    'leftFore',
+    'rightUpper',
+    'rightFore',
+    'torso',
+  ];
+  let sum = 0;
+  let n = 0;
+  for (const k of keys) {
+    const d = angDiff(ra[k], la[k]);
+    if (d != null) {
+      sum += score(d, TOL.poseAngle);
+      n += 1;
+    }
+  }
+  return n === 0 ? 0 : sum / n;
 }
 
 export function matchFace(ref: FaceFeatures, live: FaceFeatures): MatchScores {
@@ -39,7 +100,7 @@ export function matchFace(ref: FaceFeatures, live: FaceFeatures): MatchScores {
     Math.max(ref.framing.size, 0.01);
   const framing = (score(dpos, TOL.pos) + score(dsize, TOL.size)) / 2;
 
-  // 각도
+  // 고개 각도
   const dyaw = Math.abs(ref.orientation.yaw - live.orientation.yaw);
   const dpitch = Math.abs(ref.orientation.pitch - live.orientation.pitch);
   const droll = Math.abs(ref.orientation.roll - live.orientation.roll);
@@ -64,40 +125,22 @@ export function matchFace(ref: FaceFeatures, live: FaceFeatures): MatchScores {
   const dgaze = Math.hypot(ref.gaze.x - live.gaze.x, ref.gaze.y - live.gaze.y);
   const gaze = score(dgaze, TOL.gaze);
 
-  // 자세(반신): 레퍼런스에 몸이 있을 때만. 몸 중심/크기 + 머리-몸 상대 위치(기울기·돌림)
-  const hasBody = !!ref.body;
-  let body = 1;
-  if (ref.body) {
-    if (!live.body) {
-      body = 0; // 몸을 더 보여줘야 함
-    } else {
-      const dc = Math.hypot(ref.body.cx - live.body.cx, ref.body.cy - live.body.cy);
-      const dw = Math.abs(ref.body.w - live.body.w) / Math.max(ref.body.w, 0.05);
-      // 머리가 몸 대비 어디에 있나 (고개 기울이기/돌리기 → 머리-몸 오프셋)
-      const roX = ref.framing.cx - ref.body.cx;
-      const roY = ref.framing.cy - ref.body.cy;
-      const loX = live.framing.cx - live.body.cx;
-      const loY = live.framing.cy - live.body.cy;
-      const doff = Math.hypot(roX - loX, roY - loY);
-      body =
-        (score(dc, TOL.bodyPos) +
-          score(dw, TOL.bodySize) +
-          score(doff, TOL.headOff)) /
-        3;
-    }
-  }
+  // 자세(상체) — 주력. 레퍼런스에 포즈가 있을 때만.
+  const hasPose = !!ref.pose;
+  const pose = hasPose ? matchPose(ref.pose, live.pose) : 1;
 
-  // 종합: 자세가 있으면 5분할, 없으면 4분할 가중
-  const overall = hasBody
-    ? framing * 0.22 +
-      orientation * 0.24 +
-      expression * 0.18 +
-      gaze * 0.14 +
-      body * 0.22
+  // 종합: 자세 > 구도 > 각도 > 표정 > 시선
+  const overall = hasPose
+    ? pose * 0.4 +
+      framing * 0.2 +
+      orientation * 0.15 +
+      expression * 0.15 +
+      gaze * 0.1
     : framing * 0.3 + orientation * 0.3 + expression * 0.22 + gaze * 0.18;
-  return { framing, orientation, expression, gaze, body, hasBody, overall };
+
+  return { pose, framing, expression, gaze, orientation, hasPose, overall };
 }
 
-export const MATCH_THRESHOLD = 0.7; // 각 항목 합격선
-export const SHUTTER_HOLD_MS = 600; // 임계 유지 시간
+export const MATCH_THRESHOLD = 0.7;
+export const SHUTTER_HOLD_MS = 600;
 export const SHUTTER_COOLDOWN_MS = 3000;

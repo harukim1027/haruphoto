@@ -1,5 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import {
   Camera,
   useCameraDevice,
@@ -12,7 +18,12 @@ import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
-import { toFaceFeatures, type FaceVisionResult } from '../face/types';
+import {
+  toFaceFeatures,
+  type FaceVisionResult,
+  type PoseJoints,
+  type Pt,
+} from '../face/types';
 import {
   matchFace,
   MATCH_THRESHOLD,
@@ -21,6 +32,7 @@ import {
   type MatchScores,
 } from '../face/matchFace';
 import { guideText } from '../face/guide';
+import PoseSkeleton from '../components/PoseSkeleton';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -35,28 +47,49 @@ function detectFace(frame: Parameters<Parameters<typeof useFrameProcessor>[0]>[0
 }
 
 const ZERO: MatchScores = {
+  pose: 0,
   framing: 0,
-  orientation: 0,
   expression: 0,
   gaze: 0,
-  body: 0,
-  hasBody: false,
+  orientation: 0,
+  hasPose: false,
   overall: 0,
 };
+
+// 관절(top-left 정규화, mirror 보정됨) → 화면 픽셀. 전면은 미러 프리뷰라 x 다시 반전.
+function poseToScreen(
+  pose: PoseJoints | undefined,
+  front: boolean,
+  w: number,
+  h: number,
+): Partial<Record<keyof PoseJoints, Pt>> {
+  const out: Partial<Record<keyof PoseJoints, Pt>> = {};
+  if (!pose) return out;
+  for (const k of Object.keys(pose) as (keyof PoseJoints)[]) {
+    const j = pose[k];
+    if (j && j.c > 0.2) {
+      out[k] = { x: (front ? 1 - j.x : j.x) * w, y: j.y * h };
+    }
+  }
+  return out;
+}
 
 export default function ShootScreen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Rt>();
   const { referenceUri, referenceFeatures } = route.params;
+  const { width: W, height: H } = useWindowDimensions();
 
   const [position, setPosition] = useState<CameraPosition>('front'); // 전면 기본
   const device = useCameraDevice(position);
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef<Camera>(null);
+  const front = position === 'front';
 
   const [scores, setScores] = useState<MatchScores>(ZERO);
-  const [guide, setGuide] = useState('얼굴을 화면에 맞춰주세요');
+  const [guide, setGuide] = useState('상체가 보이게 서주세요');
   const [hasFace, setHasFace] = useState(false);
+  const [livePose, setLivePose] = useState<PoseJoints | undefined>(undefined);
   const [capturing, setCapturing] = useState(false);
 
   const highSince = useSharedValue(0);
@@ -85,10 +118,11 @@ export default function ShootScreen() {
   };
 
   const report = Worklets.createRunOnJS(
-    (s: MatchScores, g: string, face: boolean) => {
-      setHasFace(face);
-      setScores(face ? s : ZERO);
+    (s: MatchScores, g: string, ok: boolean, pose?: PoseJoints) => {
+      setHasFace(ok);
+      setScores(ok ? s : ZERO);
       setGuide(g);
+      setLivePose(pose);
     },
   );
   const triggerShutter = Worklets.createRunOnJS(() => capture());
@@ -104,20 +138,19 @@ export default function ShootScreen() {
         highSince.value = 0;
         if (now - lastReport.value > 150) {
           lastReport.value = now;
-          report(ZERO, '얼굴이 보이지 않아요', false);
+          report(ZERO, '사람이 보이지 않아요', false, undefined);
         }
         return;
       }
 
       const s = matchFace(referenceFeatures, live);
       const allGood =
+        (!s.hasPose || s.pose >= MATCH_THRESHOLD) &&
         s.framing >= MATCH_THRESHOLD &&
         s.orientation >= MATCH_THRESHOLD &&
         s.expression >= MATCH_THRESHOLD &&
-        s.gaze >= MATCH_THRESHOLD &&
-        (!s.hasBody || s.body >= MATCH_THRESHOLD);
+        s.gaze >= MATCH_THRESHOLD;
 
-      // ── 자동 셔터: 4항목 모두 임계 이상을 HOLD 동안 유지 ──
       if (now >= cooldownUntil.value) {
         if (allGood) {
           if (highSince.value === 0) highSince.value = now;
@@ -131,10 +164,10 @@ export default function ShootScreen() {
         }
       }
 
-      if (now - lastReport.value > 150) {
+      if (now - lastReport.value > 120) {
         lastReport.value = now;
         const g = allGood ? '완벽해요! 그대로!' : guideText(referenceFeatures, live, s);
-        report(s, g, true);
+        report(s, g, true, live.pose);
       }
     },
     [referenceFeatures, report, triggerShutter],
@@ -150,26 +183,19 @@ export default function ShootScreen() {
     );
   }
 
-  // 레퍼런스 얼굴 위치 가이드 타원 (전면은 미러라 x 반전)
-  const targetX =
-    position === 'front' ? 1 - referenceFeatures.framing.cx : referenceFeatures.framing.cx;
-  const target = {
+  // 목표(레퍼런스) 상체 스켈레톤 + 실시간 스켈레톤 → 화면 좌표
+  const targetPose = poseToScreen(referenceFeatures.pose, front, W, H);
+  const livePoseScreen = poseToScreen(livePose, front, W, H);
+  const hasTargetPose = Object.keys(targetPose).length > 0;
+
+  // 레퍼런스 얼굴 위치 가이드 타원
+  const targetX = front ? 1 - referenceFeatures.framing.cx : referenceFeatures.framing.cx;
+  const faceTarget = {
     left: `${(targetX - referenceFeatures.framing.size / 2) * 100}%` as const,
     top: `${(referenceFeatures.framing.cy - referenceFeatures.framing.size / 2) * 100}%` as const,
     width: `${referenceFeatures.framing.size * 100}%` as const,
     aspectRatio: 1,
   };
-
-  // 레퍼런스 상체 위치 가이드 (반신 셀카일 때)
-  const rb = referenceFeatures.body;
-  const bodyTarget = rb
-    ? {
-        left: `${((position === 'front' ? 1 - rb.cx : rb.cx) - rb.w / 2) * 100}%` as const,
-        top: `${(rb.cy - rb.h / 2) * 100}%` as const,
-        width: `${rb.w * 100}%` as const,
-        height: `${rb.h * 100}%` as const,
-      }
-    : null;
 
   return (
     <View style={styles.container}>
@@ -183,26 +209,30 @@ export default function ShootScreen() {
         pixelFormat="yuv"
       />
 
-      {/* 레퍼런스 상체 위치 가이드 (반신 셀카) */}
-      {bodyTarget && (
-        <View pointerEvents="none" style={[styles.bodyTarget, bodyTarget]} />
+      {/* 목표 자세 (반투명 흰색) */}
+      {hasTargetPose && (
+        <PoseSkeleton joints={targetPose} color="rgba(255,255,255,0.55)" width={6} />
+      )}
+      {/* 내 실시간 자세 (초록) */}
+      {Object.keys(livePoseScreen).length > 0 && (
+        <PoseSkeleton joints={livePoseScreen} color="#00E08A" width={4} />
       )}
 
       {/* 레퍼런스 얼굴 위치 가이드 */}
-      <View pointerEvents="none" style={[styles.target, target, hasFace && styles.targetOn]} />
+      <View pointerEvents="none" style={[styles.faceTarget, faceTarget, hasFace && styles.faceTargetOn]} />
 
       {/* ── 핵심: 큰 가이드 문구 ── */}
       <View pointerEvents="none" style={styles.guideWrap}>
         <Text style={styles.guideText}>{guide}</Text>
       </View>
 
-      {/* 일치율 (반신이면 자세 포함 5분할) */}
+      {/* 일치율 (자세 우선) */}
       <View pointerEvents="none" style={styles.bars}>
+        {scores.hasPose && <Bar label="자세" v={scores.pose} big />}
         <Bar label="구도" v={scores.framing} />
         <Bar label="각도" v={scores.orientation} />
         <Bar label="표정" v={scores.expression} />
         <Bar label="시선" v={scores.gaze} />
-        {scores.hasBody && <Bar label="자세" v={scores.body} />}
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
@@ -211,10 +241,10 @@ export default function ShootScreen() {
         style={styles.flip}
         onPress={() => setPosition((p) => (p === 'front' ? 'back' : 'front'))}
       >
-        <Text style={styles.flipText}>{position === 'front' ? '후면' : '전면'}</Text>
+        <Text style={styles.flipText}>{front ? '후면' : '전면'}</Text>
       </Pressable>
 
-      {/* 수동 셔터 (백업) */}
+      {/* 수동 셔터 */}
       <Pressable style={styles.shutter} onPress={capture} disabled={capturing}>
         <View style={styles.shutterInner} />
       </Pressable>
@@ -222,15 +252,16 @@ export default function ShootScreen() {
   );
 }
 
-function Bar({ label, v }: { label: string; v: number }) {
+function Bar({ label, v, big }: { label: string; v: number; big?: boolean }) {
   const ok = v >= MATCH_THRESHOLD;
   return (
     <View style={styles.barRow}>
-      <Text style={styles.barLabel}>{label}</Text>
-      <View style={styles.barTrack}>
+      <Text style={[styles.barLabel, big && styles.barLabelBig]}>{label}</Text>
+      <View style={[styles.barTrack, big && styles.barTrackBig]}>
         <View
           style={[
             styles.barFill,
+            big && styles.barTrackBig,
             { width: `${Math.round(v * 100)}%`, backgroundColor: ok ? '#00E08A' : '#FFB020' },
           ]}
         />
@@ -249,23 +280,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   centerText: { color: '#fff', fontSize: 16 },
-  target: {
-    position: 'absolute',
-    borderWidth: 3,
-    borderColor: 'rgba(255,255,255,0.5)',
-    borderRadius: 999,
-  },
-  targetOn: { borderColor: 'rgba(0,224,138,0.9)' },
-  bodyTarget: {
+  faceTarget: {
     position: 'absolute',
     borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.35)',
-    borderRadius: 24,
-    borderStyle: 'dashed',
+    borderColor: 'rgba(255,255,255,0.4)',
+    borderRadius: 999,
   },
+  faceTargetOn: { borderColor: 'rgba(0,224,138,0.8)' },
   guideWrap: {
     position: 'absolute',
-    top: 120,
+    top: 110,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -293,6 +317,7 @@ const styles = StyleSheet.create({
   },
   barRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   barLabel: { color: '#FFF', fontSize: 13, width: 32 },
+  barLabelBig: { fontSize: 15, fontWeight: '700' },
   barTrack: {
     flex: 1,
     height: 8,
@@ -300,6 +325,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     overflow: 'hidden',
   },
+  barTrackBig: { height: 12, borderRadius: 6 },
   barFill: { height: 8, borderRadius: 4 },
   barPct: { color: '#FFF', fontSize: 12, width: 26, textAlign: 'right' },
   overall: { color: '#00E08A', fontSize: 14, fontWeight: '700', marginTop: 4 },

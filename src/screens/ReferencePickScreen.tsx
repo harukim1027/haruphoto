@@ -12,7 +12,13 @@ import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { extractFaceFromImage } from '../face/extractFaceFromImage';
-import { mapCover, type FaceFeatures, type Pt } from '../face/types';
+import {
+  mapCover,
+  type FaceFeatures,
+  type PoseJoints,
+  type Pt,
+} from '../face/types';
+import PoseSkeleton from '../components/PoseSkeleton';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ReferencePick'>;
@@ -66,22 +72,23 @@ export default function ReferencePickScreen() {
     { p: toScreen(lm?.nose), color: '#FFD400', key: 'no' },
     { p: toScreen(lm?.mouth), color: '#FF5A5A', key: 'mo' },
   ];
-  // 검출된 상체 박스(자세) — cover 매핑
-  const bb = features?.bodyBox;
-  const bodyRect =
-    bb && img
-      ? (() => {
-          const tl = mapCover(bb.x, bb.y, img.w, img.h, previewW, previewH);
-          const br = mapCover(bb.x + bb.w, bb.y + bb.h, img.w, img.h, previewW, previewH);
-          return { left: tl.x, top: tl.y, width: br.x - tl.x, height: br.y - tl.y };
-        })()
-      : null;
+  // 상체 스켈레톤(자세) — cover 매핑
+  const poseScreen: Partial<Record<keyof PoseJoints, Pt>> = {};
+  if (features?.pose && img) {
+    for (const k of Object.keys(features.pose) as (keyof PoseJoints)[]) {
+      const j = features.pose[k];
+      if (j && j.c > 0.2) {
+        poseScreen[k] = mapCover(j.x, j.y, img.w, img.h, previewW, previewH);
+      }
+    }
+  }
+  const hasPose = Object.keys(poseScreen).length > 0;
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>레퍼런스 고르기</Text>
       <Text style={styles.desc}>
-        따라 찍고 싶은 사진을 골라주세요. 얼굴이 또렷한 셀카/상반신 사진일수록 잘 잡혀요.
+        따라 찍고 싶은 상반신 사진을 골라주세요. 어깨·팔이 보일수록 자세가 잘 잡혀요.
       </Text>
 
       <Pressable
@@ -91,7 +98,7 @@ export default function ReferencePickScreen() {
         {uri ? (
           <>
             <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-            {bodyRect && <View pointerEvents="none" style={[styles.bodyRect, bodyRect]} />}
+            {hasPose && <PoseSkeleton joints={poseScreen} color="#22D3EE" width={4} />}
             {dots.map(
               (d) =>
                 d.p && (
@@ -117,7 +124,11 @@ export default function ReferencePickScreen() {
         )}
       </Pressable>
 
-      {features && !error && <Text style={styles.ok}>✓ 얼굴을 인식했어요</Text>}
+      {features && !error && (
+        <Text style={styles.ok}>
+          ✓ 얼굴 인식{hasPose ? ' · 상체 자세 인식' : ' (상체가 더 보이면 자세도 잡혀요)'}
+        </Text>
+      )}
       {error && <Text style={styles.error}>{error}</Text>}
 
       <View style={styles.actions}>
@@ -138,7 +149,7 @@ export default function ReferencePickScreen() {
             })
           }
         >
-          <Text style={styles.primaryText}>이 얼굴로 촬영</Text>
+          <Text style={styles.primaryText}>이 자세로 촬영</Text>
         </Pressable>
       </View>
     </View>

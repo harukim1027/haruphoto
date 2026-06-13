@@ -25,25 +25,43 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
 
     let orientation = cgOrientation(from: frame.orientation)
     let faceReq = VNDetectFaceLandmarksRequest()
-    let bodyReq = VNDetectHumanRectanglesRequest()
-    if #available(iOS 15.0, *) { bodyReq.upperBodyOnly = true }
+    let poseReq = VNDetectHumanBodyPoseRequest()
     let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
     do {
-      try handler.perform([faceReq, bodyReq])
+      try handler.perform([faceReq, poseReq])
     } catch {
       return ["found": false]
     }
-
+    let pose = Self.poseJoints(poseReq.results?.first)
     guard let face = (faceReq.results)?.first else {
+      if let pose = pose {
+        return ["found": true, "noFace": true, "mirrored": frame.isMirrored, "pose": pose]
+      }
       return ["found": false]
     }
     var result = Self.features(from: face, mirrored: frame.isMirrored)
-    if let b = bodyReq.results?.first, b.confidence > 0.3 {
-      let bb = b.boundingBox
-      result["body"] = ["x": Double(bb.minX), "y": Double(1.0 - bb.maxY),
-                        "w": Double(bb.width), "h": Double(bb.height)]
-    }
+    if let pose = pose { result["pose"] = pose }
     return result
+  }
+
+  /// 상체 관절 → top-left 정규화 + 신뢰도
+  static func poseJoints(_ obs: VNHumanBodyPoseObservation?) -> [String: Any]? {
+    guard let body = obs else { return nil }
+    let names: [(String, VNHumanBodyPoseObservation.JointName)] = [
+      ("neck", .neck),
+      ("leftShoulder", .leftShoulder), ("rightShoulder", .rightShoulder),
+      ("leftElbow", .leftElbow), ("rightElbow", .rightElbow),
+      ("leftWrist", .leftWrist), ("rightWrist", .rightWrist),
+      ("root", .root),
+    ]
+    var out: [String: Any] = [:]
+    for (key, jn) in names {
+      if let p = try? body.recognizedPoint(jn), p.confidence > 0.1 {
+        out[key] = ["x": Double(p.location.x), "y": Double(1.0 - p.location.y),
+                    "c": Double(p.confidence)]
+      }
+    }
+    return out.isEmpty ? nil : out
   }
 
   /// VNFaceObservation → 정규화된 특징 딕셔너리
