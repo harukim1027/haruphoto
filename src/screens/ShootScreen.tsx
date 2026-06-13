@@ -1,25 +1,30 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from 'react-native';
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
-  useSkiaFrameProcessor,
+  useFrameProcessor,
   VisionCameraProxy,
   type CameraDevice,
   type CameraPosition,
 } from 'react-native-vision-camera';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { PaintStyle, Skia } from '@shopify/react-native-skia';
 import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
 import {
-  POSE_EDGES,
   toFaceFeatures,
   type FaceVisionResult,
   type PoseJoints,
+  type Pt,
 } from '../face/types';
 import {
   matchFace,
@@ -29,6 +34,7 @@ import {
   type MatchScores,
 } from '../face/matchFace';
 import { guideText } from '../face/guide';
+import PoseSkeleton from '../components/PoseSkeleton';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -36,13 +42,8 @@ type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 
-// 화면 배율 프리셋(쉽게 추가/수정). 화면배율 ≠ VisionCamera zoom 값.
 const ZOOM_PRESETS = [0.5, 0.6, 0.9, 1, 1.5, 2];
-
 const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
-
-// 화면 배율(0.5x=초광각, 1x=광각) → device zoom 값
-//  0.5x → minZoom, 1x → neutralZoom (그 사이는 보간), 1x↑ → neutralZoom*배율
 function displayToZoom(d: number, dev: CameraDevice): number {
   const z =
     d >= 1
@@ -50,53 +51,15 @@ function displayToZoom(d: number, dev: CameraDevice): number {
       : dev.minZoom + ((d - 0.5) / 0.5) * (dev.neutralZoom - dev.minZoom);
   return clamp(z, dev.minZoom, dev.maxZoom);
 }
-// device zoom 값 → 화면 배율 (버튼 하이라이트용)
 function zoomToDisplay(z: number, dev: CameraDevice): number {
   if (z >= dev.neutralZoom) return z / dev.neutralZoom;
   if (dev.neutralZoom <= dev.minZoom + 1e-3) return 1;
   return 0.5 + ((z - dev.minZoom) / (dev.neutralZoom - dev.minZoom)) * 0.5;
 }
-// 기기에 해당 배율이 가능한지 (초광각 없으면 <1x 불가)
 function presetAvailable(d: number, dev: CameraDevice): boolean {
   if (d < 1) return dev.minZoom < dev.neutralZoom * 0.97;
   if (d > 1) return dev.neutralZoom * d <= dev.maxZoom * 1.02;
   return true;
-}
-
-const JOINT_KEYS: (keyof PoseJoints)[] = [
-  'neck',
-  'leftShoulder',
-  'rightShoulder',
-  'leftElbow',
-  'rightElbow',
-  'leftWrist',
-  'rightWrist',
-  'root',
-];
-
-// 프레임 안에 상체 스켈레톤을 그린다(카메라와 확실히 합성). flip=전면 미러 보정.
-function drawSkeleton(
-  frame: { drawLine: Function; drawCircle: Function; width: number; height: number },
-  pose: PoseJoints,
-  flip: boolean,
-  linePaint: unknown,
-  jointPaint: unknown,
-) {
-  'worklet';
-  const fw = frame.width;
-  const fh = frame.height;
-  const X = (x: number) => (flip ? 1 - x : x) * fw;
-  for (let i = 0; i < POSE_EDGES.length; i++) {
-    const a = pose[POSE_EDGES[i][0]];
-    const b = pose[POSE_EDGES[i][1]];
-    if (a && b && a.c > 0.2 && b.c > 0.2) {
-      frame.drawLine(X(a.x), a.y * fh, X(b.x), b.y * fh, linePaint);
-    }
-  }
-  for (let i = 0; i < JOINT_KEYS.length; i++) {
-    const j = pose[JOINT_KEYS[i]];
-    if (j && j.c > 0.2) frame.drawCircle(X(j.x), j.y * fh, 7, jointPaint);
-  }
 }
 
 const ZERO: MatchScores = {
@@ -109,12 +72,45 @@ const ZERO: MatchScores = {
   overall: 0,
 };
 
+interface LiveData {
+  pose?: PoseJoints; // un-mirror 보정됨 (프리뷰 사용자 몸 위치에 일치)
+  cx: number;
+  cy: number;
+  size: number;
+  poseCount: number;
+  fw: number;
+  fh: number;
+}
+
+// 관절(정규화) → 화면 좌표. cover crop 보정 + (전면이면 toFaceFeatures가 이미 un-mirror).
+function toScreenJoints(
+  pose: PoseJoints | undefined,
+  imgW: number,
+  imgH: number,
+  contW: number,
+  contH: number,
+): Partial<Record<keyof PoseJoints, Pt>> {
+  const out: Partial<Record<keyof PoseJoints, Pt>> = {};
+  if (!pose || imgW <= 0 || imgH <= 0) return out;
+  const scale = Math.max(contW / imgW, contH / imgH);
+  const dW = imgW * scale;
+  const dH = imgH * scale;
+  const offX = (contW - dW) / 2;
+  const offY = (contH - dH) / 2;
+  for (const k of Object.keys(pose) as (keyof PoseJoints)[]) {
+    const j = pose[k];
+    if (j && j.c > 0.3) out[k] = { x: offX + j.x * dW, y: offY + j.y * dH };
+  }
+  return out;
+}
+
 export default function ShootScreen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Rt>();
   const { referenceUri, referenceFeatures } = route.params;
+  const { width: W, height: H } = useWindowDimensions();
 
-  const [position, setPosition] = useState<CameraPosition>('front'); // 전면 기본
+  const [position, setPosition] = useState<CameraPosition>('front');
   const device = useCameraDevice(position, {
     physicalDevices: [
       'ultra-wide-angle-camera',
@@ -126,39 +122,32 @@ export default function ShootScreen() {
   const cameraRef = useRef<Camera>(null);
   const front = position === 'front';
 
-  // 레퍼런스 자세 데이터 전달 확인용
   const refPose = referenceFeatures.pose;
-  const refJointCount = refPose
-    ? JOINT_KEYS.filter((k) => refPose[k] && (refPose[k] as { c: number }).c > 0.2).length
-    : 0;
+  const refImg = referenceFeatures.imageSize ?? { w: 3, h: 4 };
 
   const [scores, setScores] = useState<MatchScores>(ZERO);
-  const [guide, setGuide] = useState(
-    refJointCount > 0 ? '흰 선에 자세를 맞춰주세요' : '상체가 보이게 서주세요',
-  );
+  const [guide, setGuide] = useState('상체가 보이게 서주세요');
   const [hasFace, setHasFace] = useState(false);
+  const [live, setLive] = useState<LiveData | null>(null);
   const [capturing, setCapturing] = useState(false);
+  const [debug, setDebug] = useState(true);
 
   const [zoom, setZoom] = useState(device?.neutralZoom ?? 1);
   const startZoom = useRef(device?.neutralZoom ?? 1);
   useEffect(() => {
     if (!device) return;
-    setZoom(device.neutralZoom); // 디바이스/전후면 바뀌면 1x로 리셋
+    setZoom(device.neutralZoom);
     console.log(
-      `[zoom] ${position} lenses=${JSON.stringify(device.physicalDevices)} ` +
-        `min=${device.minZoom.toFixed(3)} neutral=${device.neutralZoom.toFixed(3)} max=${device.maxZoom.toFixed(2)}`,
+      `[zoom] ${position} lenses=${JSON.stringify(device.physicalDevices)} min=${device.minZoom.toFixed(3)} neutral=${device.neutralZoom.toFixed(3)} max=${device.maxZoom.toFixed(2)}`,
     );
   }, [device, position]);
-
-  // 핀치 연속 줌
   const pinch = Gesture.Pinch()
     .runOnJS(true)
     .onBegin(() => {
       startZoom.current = zoom;
     })
     .onUpdate((e) => {
-      if (!device) return;
-      setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
+      if (device) setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
     });
 
   const highSince = useSharedValue(0);
@@ -187,65 +176,38 @@ export default function ShootScreen() {
   };
 
   const report = Worklets.createRunOnJS(
-    (s: MatchScores, g: string, ok: boolean) => {
+    (s: MatchScores, g: string, ok: boolean, ld: LiveData | null) => {
       setHasFace(ok);
       setScores(ok ? s : ZERO);
       setGuide(g);
+      setLive(ld);
     },
   );
   const triggerShutter = Worklets.createRunOnJS(() => capture());
 
-  const frameProcessor = useSkiaFrameProcessor(
+  const frameProcessor = useFrameProcessor(
     (frame) => {
       'worklet';
-      frame.render(); // 카메라 프리뷰
-
-      // ── 목표 자세(레퍼런스): 흰 선 ──
-      if (refPose) {
-        const tLine = Skia.Paint();
-        tLine.setColor(Skia.Color('rgba(255,255,255,0.7)'));
-        tLine.setStyle(PaintStyle.Stroke);
-        tLine.setStrokeWidth(10);
-        const tDot = Skia.Paint();
-        tDot.setColor(Skia.Color('rgba(255,255,255,0.85)'));
-        // 전면이면 목표를 미러해서 사진과 같은 배치로 보이게
-        drawSkeleton(frame, refPose, front, tLine, tDot);
-      }
-
       const raw = facePlugin?.call(frame) as unknown as FaceVisionResult | undefined;
-      const live = raw ? toFaceFeatures(raw) : null;
+      const lf = raw ? toFaceFeatures(raw) : null;
       const now = Date.now();
 
-      if (!live) {
+      if (!lf) {
         highSince.value = 0;
         if (now - lastReport.value > 150) {
           lastReport.value = now;
-          report(ZERO, '사람이 보이지 않아요', false);
+          report(ZERO, '사람이 보이지 않아요', false, null);
         }
         return;
       }
 
-      const s = matchFace(referenceFeatures, live);
+      const s = matchFace(referenceFeatures, lf);
       const allGood =
         (!s.hasPose || s.pose >= MATCH_THRESHOLD) &&
         s.framing >= MATCH_THRESHOLD &&
         s.orientation >= MATCH_THRESHOLD &&
         s.expression >= MATCH_THRESHOLD &&
         s.gaze >= MATCH_THRESHOLD;
-
-      // ── 내 실시간 자세: 가까울수록 초록(노랑→초록) ──
-      if (raw?.pose) {
-        const t = s.hasPose ? s.pose : s.overall;
-        const c = t >= MATCH_THRESHOLD ? '#00E08A' : t >= 0.45 ? '#FFD400' : '#FF8A3D';
-        const lLine = Skia.Paint();
-        lLine.setColor(Skia.Color(c));
-        lLine.setStyle(PaintStyle.Stroke);
-        lLine.setStrokeWidth(6);
-        const lDot = Skia.Paint();
-        lDot.setColor(Skia.Color(c));
-        // 라이브는 원본 프레임 좌표(미러 보정 X) — 프리뷰 미러가 사용자 몸에 맞춰줌
-        drawSkeleton(frame, raw.pose, false, lLine, lDot);
-      }
 
       if (now >= cooldownUntil.value) {
         if (allGood) {
@@ -262,11 +224,20 @@ export default function ShootScreen() {
 
       if (now - lastReport.value > 120) {
         lastReport.value = now;
-        const g = allGood ? '완벽해요! 그대로!' : guideText(referenceFeatures, live, s);
-        report(s, g, true);
+        const g = allGood ? '완벽해요! 그대로!' : guideText(referenceFeatures, lf, s);
+        const pc = lf.pose ? Object.keys(lf.pose).length : 0;
+        report(s, g, true, {
+          pose: lf.pose,
+          cx: lf.framing.cx,
+          cy: lf.framing.cy,
+          size: lf.framing.size,
+          poseCount: pc,
+          fw: frame.width,
+          fh: frame.height,
+        });
       }
     },
-    [referenceFeatures, refPose, front, report, triggerShutter],
+    [referenceFeatures, report, triggerShutter],
   );
 
   if (!hasPermission || device == null) {
@@ -281,6 +252,12 @@ export default function ShootScreen() {
 
   const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device));
   const activeMul = zoomToDisplay(zoom, device);
+
+  // 라이브 프레임의 oriented 종횡비 추정(세로 프리뷰 가정: 짧은변=가로)
+  const liveW = live ? Math.min(live.fw, live.fh) : W;
+  const liveH = live ? Math.max(live.fw, live.fh) : H;
+  const targetJoints = toScreenJoints(refPose, refImg.w, refImg.h, W, H);
+  const liveJoints = toScreenJoints(live?.pose, liveW, liveH, W, H);
 
   return (
     <View style={styles.container}>
@@ -297,17 +274,38 @@ export default function ShootScreen() {
         />
       </GestureDetector>
 
-      {/* 큰 가이드 문구 */}
+      {/* 목표 자세(레퍼런스): 흰색 */}
+      {Object.keys(targetJoints).length > 0 && (
+        <PoseSkeleton joints={targetJoints} color="rgba(255,255,255,0.65)" width={8} />
+      )}
+      {/* 내 실시간 자세: 초록 */}
+      {Object.keys(liveJoints).length > 0 && (
+        <PoseSkeleton joints={liveJoints} color="#00E08A" width={5} />
+      )}
+
       <View pointerEvents="none" style={styles.guideWrap}>
         <Text style={styles.guideText}>{guide}</Text>
-        {refJointCount === 0 && (
-          <Text style={styles.warn}>
-            이 레퍼런스는 상체가 적게 나와 자세 가이드가 없어요 (얼굴·구도로 맞춰요)
-          </Text>
+        {!refPose && (
+          <Text style={styles.warn}>이 레퍼런스는 상체가 적게 나와 자세 가이드가 없어요</Text>
         )}
       </View>
 
-      {/* 일치율 (자세 우선) */}
+      {/* 진단 (좌표 정합 확인용) */}
+      {debug && (
+        <Pressable style={styles.debug} onPress={() => setDebug(false)}>
+          <Text style={styles.debugText}>
+            live face cx{live?.cx.toFixed(2) ?? '-'} cy{live?.cy.toFixed(2) ?? '-'} size
+            {live?.size.toFixed(2) ?? '-'} | pose관절 {live?.poseCount ?? 0} | frame{' '}
+            {live ? `${live.fw}x${live.fh}` : '-'}
+            {'\n'}ref cx{referenceFeatures.framing.cx.toFixed(2)} cy
+            {referenceFeatures.framing.cy.toFixed(2)} size
+            {referenceFeatures.framing.size.toFixed(2)} | ref관절{' '}
+            {refPose ? Object.keys(refPose).length : 0} | refImg {refImg.w}x{refImg.h}
+            {'\n'}(탭하면 숨김)
+          </Text>
+        </Pressable>
+      )}
+
       <View pointerEvents="none" style={styles.bars}>
         {scores.hasPose && <Bar label="자세" v={scores.pose} big />}
         <Bar label="구도" v={scores.framing} />
@@ -317,7 +315,6 @@ export default function ShootScreen() {
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
-      {/* 줌/렌즈 프리셋 (기기에 있는 배율만, 핀치로 연속 줌도 가능) */}
       {presets.length > 1 && (
         <View style={styles.zoomRow}>
           {presets.map((m) => {
@@ -337,7 +334,6 @@ export default function ShootScreen() {
         </View>
       )}
 
-      {/* 전/후면 토글 */}
       <Pressable
         style={styles.flip}
         onPress={() => setPosition((p) => (p === 'front' ? 'back' : 'front'))}
@@ -345,7 +341,6 @@ export default function ShootScreen() {
         <Text style={styles.flipText}>{front ? '후면' : '전면'}</Text>
       </Pressable>
 
-      {/* 수동 셔터 */}
       <Pressable style={styles.shutter} onPress={capture} disabled={capturing}>
         <View style={styles.shutterInner} />
       </Pressable>
@@ -374,17 +369,12 @@ function Bar({ label, v, big }: { label: string; v: number; big?: boolean }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  center: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#000',
-  },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000' },
   centerText: { color: '#fff', fontSize: 16 },
   guideWrap: { position: 'absolute', top: 100, left: 16, right: 16, alignItems: 'center' },
   guideText: {
     color: '#FFF',
-    fontSize: 26,
+    fontSize: 24,
     fontWeight: '800',
     textAlign: 'center',
     backgroundColor: 'rgba(0,0,0,0.45)',
@@ -404,6 +394,16 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
   },
+  debug: {
+    position: 'absolute',
+    top: 200,
+    left: 12,
+    right: 12,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 8,
+    padding: 8,
+  },
+  debugText: { color: '#7FFFD4', fontSize: 11, fontFamily: 'Courier' },
   bars: {
     position: 'absolute',
     bottom: 180,

@@ -17,6 +17,7 @@ const TOL = {
   expr: 0.18,
   gaze: 0.22,
   poseAngle: 0.45, // 상체 관절 각도 허용오차(radian, ~26°)
+  poseRel: 0.5, // 어깨 기준 정규화 좌표 거리 허용오차(어깨너비 단위)
 };
 
 function score(diff: number, tol: number): number {
@@ -62,30 +63,62 @@ function angDiff(a?: number, b?: number): number | undefined {
   return d;
 }
 
-// 두 포즈의 각도 일치율 (공통으로 잡힌 각도만 평균)
+// 어깨중점을 원점, 어깨너비를 스케일로 한 정규화 좌표(위치·크기 불변)
+type NPose = Partial<Record<keyof PoseJoints, { x: number; y: number }>>;
+export function normalizePose(p?: PoseJoints): NPose | null {
+  'worklet';
+  if (!p) return null;
+  const lS = p.leftShoulder;
+  const rS = p.rightShoulder;
+  if (!lS || !rS || lS.c < 0.3 || rS.c < 0.3) return null;
+  const ox = (lS.x + rS.x) / 2;
+  const oy = (lS.y + rS.y) / 2;
+  const w = Math.hypot(rS.x - lS.x, rS.y - lS.y) || 0.01;
+  const keys: (keyof PoseJoints)[] = [
+    'neck',
+    'leftShoulder',
+    'rightShoulder',
+    'leftElbow',
+    'rightElbow',
+    'leftWrist',
+    'rightWrist',
+    'root',
+  ];
+  const out: NPose = {};
+  for (const k of keys) {
+    const j = p[k];
+    if (j && j.c > 0.3) out[k] = { x: (j.x - ox) / w, y: (j.y - oy) / w };
+  }
+  return out;
+}
+
+// 어깨 기준 정규화 좌표 거리로 자세 일치율 (위치/크기/화면비 무관)
 export function matchPose(ref?: PoseJoints, live?: PoseJoints): number {
   'worklet';
-  if (!ref || !live) return 0;
-  const ra = poseAngles(ref);
-  const la = poseAngles(live);
-  const keys: (keyof PoseAngles)[] = [
-    'shoulder',
-    'leftUpper',
-    'leftFore',
-    'rightUpper',
-    'rightFore',
-    'torso',
+  const rn = normalizePose(ref);
+  const ln = normalizePose(live);
+  if (!rn || !ln) return 0;
+  const keys: (keyof PoseJoints)[] = [
+    'neck',
+    'leftElbow',
+    'rightElbow',
+    'leftWrist',
+    'rightWrist',
+    'root',
   ];
   let sum = 0;
   let n = 0;
   for (const k of keys) {
-    const d = angDiff(ra[k], la[k]);
-    if (d != null) {
-      sum += score(d, TOL.poseAngle);
+    const a = rn[k];
+    const b = ln[k];
+    if (a && b) {
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      sum += score(d, TOL.poseRel);
       n += 1;
     }
   }
-  return n === 0 ? 0 : sum / n;
+  // 공통 관절이 없으면 어깨선만이라도 맞으면 통과(어깨너비 정규화라 항상 1)
+  return n === 0 ? 0.5 : sum / n;
 }
 
 export function matchFace(ref: FaceFeatures, live: FaceFeatures): MatchScores {
