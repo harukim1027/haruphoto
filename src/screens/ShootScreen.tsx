@@ -137,8 +137,20 @@ export default function ShootScreen() {
   useEffect(() => {
     if (!device) return;
     setZoom(device.neutralZoom);
+    // 사용자 요청 #2: 실제 device 값 로그
     console.log(
-      `[zoom] ${position} lenses=${JSON.stringify(device.physicalDevices)} min=${device.minZoom.toFixed(3)} neutral=${device.neutralZoom.toFixed(3)} max=${device.maxZoom.toFixed(2)}`,
+      '[device]',
+      position,
+      'min=',
+      device.minZoom,
+      'neutral=',
+      device.neutralZoom,
+      'max=',
+      device.maxZoom,
+      'lenses=',
+      device.physicalDevices,
+      'id=',
+      device.id,
     );
   }, [device, position]);
   const pinch = Gesture.Pinch()
@@ -294,13 +306,13 @@ export default function ShootScreen() {
       {debug && (
         <Pressable style={styles.debug} onPress={() => setDebug(false)}>
           <Text style={styles.debugText}>
-            live face cx{live?.cx.toFixed(2) ?? '-'} cy{live?.cy.toFixed(2) ?? '-'} size
-            {live?.size.toFixed(2) ?? '-'} | pose관절 {live?.poseCount ?? 0} | frame{' '}
+            DEVICE {position} min={device.minZoom.toFixed(3)} neutral=
+            {device.neutralZoom.toFixed(3)} max={device.maxZoom.toFixed(1)}
+            {'\n'}lenses=[{device.physicalDevices.join(',')}]
+            {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
+            {'\n'}live face cx{live?.cx.toFixed(2) ?? '-'} cy{live?.cy.toFixed(2) ?? '-'} size
+            {live?.size.toFixed(2) ?? '-'} | 관절 {live?.poseCount ?? 0} | frame{' '}
             {live ? `${live.fw}x${live.fh}` : '-'}
-            {'\n'}ref cx{referenceFeatures.framing.cx.toFixed(2)} cy
-            {referenceFeatures.framing.cy.toFixed(2)} size
-            {referenceFeatures.framing.size.toFixed(2)} | ref관절{' '}
-            {refPose ? Object.keys(refPose).length : 0} | refImg {refImg.w}x{refImg.h}
             {'\n'}(탭하면 숨김)
           </Text>
         </Pressable>
