@@ -1,28 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  useWindowDimensions,
-} from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
-  useFrameProcessor,
+  useSkiaFrameProcessor,
   VisionCameraProxy,
   type CameraPosition,
 } from 'react-native-vision-camera';
+import { PaintStyle, Skia } from '@shopify/react-native-skia';
 import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
 import {
+  POSE_EDGES,
   toFaceFeatures,
   type FaceVisionResult,
   type PoseJoints,
-  type Pt,
 } from '../face/types';
 import {
   matchFace,
@@ -32,7 +27,6 @@ import {
   type MatchScores,
 } from '../face/matchFace';
 import { guideText } from '../face/guide';
-import PoseSkeleton from '../components/PoseSkeleton';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -40,10 +34,40 @@ type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 
-function detectFace(frame: Parameters<Parameters<typeof useFrameProcessor>[0]>[0]) {
+const JOINT_KEYS: (keyof PoseJoints)[] = [
+  'neck',
+  'leftShoulder',
+  'rightShoulder',
+  'leftElbow',
+  'rightElbow',
+  'leftWrist',
+  'rightWrist',
+  'root',
+];
+
+// 프레임 안에 상체 스켈레톤을 그린다(카메라와 확실히 합성). flip=전면 미러 보정.
+function drawSkeleton(
+  frame: { drawLine: Function; drawCircle: Function; width: number; height: number },
+  pose: PoseJoints,
+  flip: boolean,
+  linePaint: unknown,
+  jointPaint: unknown,
+) {
   'worklet';
-  if (facePlugin == null) throw new Error('detectFace 네이티브 플러그인 없음');
-  return facePlugin.call(frame) as unknown as FaceVisionResult;
+  const fw = frame.width;
+  const fh = frame.height;
+  const X = (x: number) => (flip ? 1 - x : x) * fw;
+  for (let i = 0; i < POSE_EDGES.length; i++) {
+    const a = pose[POSE_EDGES[i][0]];
+    const b = pose[POSE_EDGES[i][1]];
+    if (a && b && a.c > 0.2 && b.c > 0.2) {
+      frame.drawLine(X(a.x), a.y * fh, X(b.x), b.y * fh, linePaint);
+    }
+  }
+  for (let i = 0; i < JOINT_KEYS.length; i++) {
+    const j = pose[JOINT_KEYS[i]];
+    if (j && j.c > 0.2) frame.drawCircle(X(j.x), j.y * fh, 7, jointPaint);
+  }
 }
 
 const ZERO: MatchScores = {
@@ -56,32 +80,12 @@ const ZERO: MatchScores = {
   overall: 0,
 };
 
-// 관절(top-left 정규화, mirror 보정됨) → 화면 픽셀. 전면은 미러 프리뷰라 x 다시 반전.
-function poseToScreen(
-  pose: PoseJoints | undefined,
-  front: boolean,
-  w: number,
-  h: number,
-): Partial<Record<keyof PoseJoints, Pt>> {
-  const out: Partial<Record<keyof PoseJoints, Pt>> = {};
-  if (!pose) return out;
-  for (const k of Object.keys(pose) as (keyof PoseJoints)[]) {
-    const j = pose[k];
-    if (j && j.c > 0.2) {
-      out[k] = { x: (front ? 1 - j.x : j.x) * w, y: j.y * h };
-    }
-  }
-  return out;
-}
-
 export default function ShootScreen() {
   const navigation = useNavigation<Nav>();
   const route = useRoute<Rt>();
   const { referenceUri, referenceFeatures } = route.params;
-  const { width: W, height: H } = useWindowDimensions();
 
   const [position, setPosition] = useState<CameraPosition>('front'); // 전면 기본
-  // 멀티렌즈(초광각·광각·망원) 가상 디바이스 — 줌으로 렌즈 자동 전환
   const device = useCameraDevice(position, {
     physicalDevices: [
       'ultra-wide-angle-camera',
@@ -93,25 +97,30 @@ export default function ShootScreen() {
   const cameraRef = useRef<Camera>(null);
   const front = position === 'front';
 
-  // 줌(렌즈) — 기기에 있는 배율만 노출
+  // 레퍼런스 자세 데이터 전달 확인용
+  const refPose = referenceFeatures.pose;
+  const refJointCount = refPose
+    ? JOINT_KEYS.filter((k) => refPose[k] && (refPose[k] as { c: number }).c > 0.2).length
+    : 0;
+
+  const [scores, setScores] = useState<MatchScores>(ZERO);
+  const [guide, setGuide] = useState(
+    refJointCount > 0 ? '흰 선에 자세를 맞춰주세요' : '상체가 보이게 서주세요',
+  );
+  const [hasFace, setHasFace] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+
   const neutral = device?.neutralZoom ?? 1;
   const [zoom, setZoom] = useState(neutral);
   useEffect(() => {
-    setZoom(device?.neutralZoom ?? 1); // 디바이스/전후면 바뀌면 1x로 리셋
+    setZoom(device?.neutralZoom ?? 1);
   }, [device?.neutralZoom, position]);
-
   const zoomPresets = device
     ? [0.5, 0.6, 0.8, 1, 1.5, 2].filter((m) => {
         const z = neutral * m;
         return z >= device.minZoom - 1e-3 && z <= device.maxZoom + 1e-3;
       })
     : [];
-
-  const [scores, setScores] = useState<MatchScores>(ZERO);
-  const [guide, setGuide] = useState('상체가 보이게 서주세요');
-  const [hasFace, setHasFace] = useState(false);
-  const [livePose, setLivePose] = useState<PoseJoints | undefined>(undefined);
-  const [capturing, setCapturing] = useState(false);
 
   const highSince = useSharedValue(0);
   const cooldownUntil = useSharedValue(0);
@@ -139,27 +148,40 @@ export default function ShootScreen() {
   };
 
   const report = Worklets.createRunOnJS(
-    (s: MatchScores, g: string, ok: boolean, pose?: PoseJoints) => {
+    (s: MatchScores, g: string, ok: boolean) => {
       setHasFace(ok);
       setScores(ok ? s : ZERO);
       setGuide(g);
-      setLivePose(pose);
     },
   );
   const triggerShutter = Worklets.createRunOnJS(() => capture());
 
-  const frameProcessor = useFrameProcessor(
+  const frameProcessor = useSkiaFrameProcessor(
     (frame) => {
       'worklet';
-      const raw = detectFace(frame);
-      const live = toFaceFeatures(raw);
+      frame.render(); // 카메라 프리뷰
+
+      // ── 목표 자세(레퍼런스): 흰 선 ──
+      if (refPose) {
+        const tLine = Skia.Paint();
+        tLine.setColor(Skia.Color('rgba(255,255,255,0.7)'));
+        tLine.setStyle(PaintStyle.Stroke);
+        tLine.setStrokeWidth(10);
+        const tDot = Skia.Paint();
+        tDot.setColor(Skia.Color('rgba(255,255,255,0.85)'));
+        // 전면이면 목표를 미러해서 사진과 같은 배치로 보이게
+        drawSkeleton(frame, refPose, front, tLine, tDot);
+      }
+
+      const raw = facePlugin?.call(frame) as unknown as FaceVisionResult | undefined;
+      const live = raw ? toFaceFeatures(raw) : null;
       const now = Date.now();
 
-      if (live == null) {
+      if (!live) {
         highSince.value = 0;
         if (now - lastReport.value > 150) {
           lastReport.value = now;
-          report(ZERO, '사람이 보이지 않아요', false, undefined);
+          report(ZERO, '사람이 보이지 않아요', false);
         }
         return;
       }
@@ -171,6 +193,20 @@ export default function ShootScreen() {
         s.orientation >= MATCH_THRESHOLD &&
         s.expression >= MATCH_THRESHOLD &&
         s.gaze >= MATCH_THRESHOLD;
+
+      // ── 내 실시간 자세: 가까울수록 초록(노랑→초록) ──
+      if (raw?.pose) {
+        const t = s.hasPose ? s.pose : s.overall;
+        const c = t >= MATCH_THRESHOLD ? '#00E08A' : t >= 0.45 ? '#FFD400' : '#FF8A3D';
+        const lLine = Skia.Paint();
+        lLine.setColor(Skia.Color(c));
+        lLine.setStyle(PaintStyle.Stroke);
+        lLine.setStrokeWidth(6);
+        const lDot = Skia.Paint();
+        lDot.setColor(Skia.Color(c));
+        // 라이브는 원본 프레임 좌표(미러 보정 X) — 프리뷰 미러가 사용자 몸에 맞춰줌
+        drawSkeleton(frame, raw.pose, false, lLine, lDot);
+      }
 
       if (now >= cooldownUntil.value) {
         if (allGood) {
@@ -188,10 +224,10 @@ export default function ShootScreen() {
       if (now - lastReport.value > 120) {
         lastReport.value = now;
         const g = allGood ? '완벽해요! 그대로!' : guideText(referenceFeatures, live, s);
-        report(s, g, true, live.pose);
+        report(s, g, true);
       }
     },
-    [referenceFeatures, report, triggerShutter],
+    [referenceFeatures, refPose, front, report, triggerShutter],
   );
 
   if (!hasPermission || device == null) {
@@ -203,20 +239,6 @@ export default function ShootScreen() {
       </View>
     );
   }
-
-  // 목표(레퍼런스) 상체 스켈레톤 + 실시간 스켈레톤 → 화면 좌표
-  const targetPose = poseToScreen(referenceFeatures.pose, front, W, H);
-  const livePoseScreen = poseToScreen(livePose, front, W, H);
-  const hasTargetPose = Object.keys(targetPose).length > 0;
-
-  // 레퍼런스 얼굴 위치 가이드 타원
-  const targetX = front ? 1 - referenceFeatures.framing.cx : referenceFeatures.framing.cx;
-  const faceTarget = {
-    left: `${(targetX - referenceFeatures.framing.size / 2) * 100}%` as const,
-    top: `${(referenceFeatures.framing.cy - referenceFeatures.framing.size / 2) * 100}%` as const,
-    width: `${referenceFeatures.framing.size * 100}%` as const,
-    aspectRatio: 1,
-  };
 
   return (
     <View style={styles.container}>
@@ -231,21 +253,14 @@ export default function ShootScreen() {
         zoom={zoom}
       />
 
-      {/* 목표 자세 (반투명 흰색) */}
-      {hasTargetPose && (
-        <PoseSkeleton joints={targetPose} color="rgba(255,255,255,0.55)" width={6} />
-      )}
-      {/* 내 실시간 자세 (초록) */}
-      {Object.keys(livePoseScreen).length > 0 && (
-        <PoseSkeleton joints={livePoseScreen} color="#00E08A" width={4} />
-      )}
-
-      {/* 레퍼런스 얼굴 위치 가이드 */}
-      <View pointerEvents="none" style={[styles.faceTarget, faceTarget, hasFace && styles.faceTargetOn]} />
-
-      {/* ── 핵심: 큰 가이드 문구 ── */}
+      {/* 큰 가이드 문구 */}
       <View pointerEvents="none" style={styles.guideWrap}>
         <Text style={styles.guideText}>{guide}</Text>
+        {refJointCount === 0 && (
+          <Text style={styles.warn}>
+            이 레퍼런스는 상체가 적게 나와 자세 가이드가 없어요 (얼굴·구도로 맞춰요)
+          </Text>
+        )}
       </View>
 
       {/* 일치율 (자세 우선) */}
@@ -258,7 +273,7 @@ export default function ShootScreen() {
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
-      {/* 줌/렌즈 프리셋 (기기에 있는 배율만) */}
+      {/* 줌/렌즈 프리셋 */}
       {zoomPresets.length > 1 && (
         <View style={styles.zoomRow}>
           {zoomPresets.map((m) => {
@@ -322,20 +337,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   centerText: { color: '#fff', fontSize: 16 },
-  faceTarget: {
-    position: 'absolute',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.4)',
-    borderRadius: 999,
-  },
-  faceTargetOn: { borderColor: 'rgba(0,224,138,0.8)' },
-  guideWrap: {
-    position: 'absolute',
-    top: 110,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
+  guideWrap: { position: 'absolute', top: 100, left: 16, right: 16, alignItems: 'center' },
   guideText: {
     color: '#FFF',
     fontSize: 26,
@@ -345,6 +347,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 10,
     borderRadius: 14,
+    overflow: 'hidden',
+  },
+  warn: {
+    color: '#FFD400',
+    fontSize: 12,
+    marginTop: 8,
+    textAlign: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
     overflow: 'hidden',
   },
   bars: {
@@ -371,16 +384,6 @@ const styles = StyleSheet.create({
   barFill: { height: 8, borderRadius: 4 },
   barPct: { color: '#FFF', fontSize: 12, width: 26, textAlign: 'right' },
   overall: { color: '#00E08A', fontSize: 14, fontWeight: '700', marginTop: 4 },
-  flip: {
-    position: 'absolute',
-    bottom: 56,
-    right: 28,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    borderRadius: 22,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-  },
-  flipText: { color: '#FFF', fontSize: 14, fontWeight: '600' },
   zoomRow: {
     position: 'absolute',
     bottom: 126,
@@ -401,6 +404,16 @@ const styles = StyleSheet.create({
   zoomBtnOn: { backgroundColor: '#FFD400' },
   zoomText: { color: '#FFF', fontSize: 13, fontWeight: '600' },
   zoomTextOn: { color: '#0D0D0F', fontSize: 13, fontWeight: '800' },
+  flip: {
+    position: 'absolute',
+    bottom: 56,
+    right: 28,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 22,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  flipText: { color: '#FFF', fontSize: 14, fontWeight: '600' },
   shutter: {
     position: 'absolute',
     bottom: 44,
