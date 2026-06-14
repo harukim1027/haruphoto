@@ -79,11 +79,14 @@ export function coverUnit(
   imgH: number,
   W: number,
   H: number,
+  contain = false, // true면 contain(전체 표시, 레터박스) — Camera resizeMode 와 일치시킬 것
 ): Pt[] | null {
   'worklet';
   if (!pts || pts.length < 3 || imgW <= 0 || imgH <= 0 || W <= 0 || H <= 0)
     return null;
-  const scale = Math.max(W / imgW, H / imgH);
+  const scale = contain
+    ? Math.min(W / imgW, H / imgH)
+    : Math.max(W / imgW, H / imgH);
   const dW = imgW * scale;
   const dH = imgH * scale;
   const offX = (W - dW) / 2;
@@ -92,6 +95,25 @@ export function coverUnit(
     x: (offX + p.x * dW) / W,
     y: (offY + p.y * dH) / H,
   }));
+}
+
+// 단일 점 매핑(얼굴 가이드/점). 화면 정규화 [0,1].
+export function coverPoint(
+  x: number,
+  y: number,
+  imgW: number,
+  imgH: number,
+  W: number,
+  H: number,
+  contain = false,
+): Pt {
+  'worklet';
+  const scale = contain
+    ? Math.min(W / imgW, H / imgH)
+    : Math.max(W / imgW, H / imgH);
+  const dW = imgW * scale;
+  const dH = imgH * scale;
+  return { x: ((W - dW) / 2 + x * dW) / W, y: ((H - dH) / 2 + y * dH) / H };
 }
 
 // 단위정사각형 좌표 → 화면 픽셀(고정 타깃 사각 영역). 위치/크기 가이드.

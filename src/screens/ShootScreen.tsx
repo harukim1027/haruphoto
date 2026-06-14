@@ -32,6 +32,7 @@ import { guideText } from '../face/guide';
 import {
   silhouetteIoU,
   coverUnit,
+  coverPoint,
   smoothEdges,
   toSmoothPathD,
   POSE_IOU_GOOD,
@@ -195,15 +196,17 @@ export default function ShootScreen() {
   const refImg = referenceFeatures.imageSize ?? { w: 3, h: 4 };
   // 레퍼런스 실루엣을 실제 구도대로 화면(cover)에 매핑(캐싱). 고정 사각형 X.
   const refScreenUnit = useMemo(
-    () => coverUnit(referenceFeatures.bodyOutline, refImg.w, refImg.h, W, H),
-    [referenceFeatures.bodyOutline, refImg.w, refImg.h, W, H],
+    () => coverUnit(referenceFeatures.bodyOutline, refImg.w, refImg.h, W, H, front),
+    [referenceFeatures.bodyOutline, refImg.w, refImg.h, W, H, front],
   );
   const hasRefSil = !!refScreenUnit && refScreenUnit.length >= 3;
-  // 레퍼런스 얼굴 위치 가이드(타원) — face bbox 를 화면에 cover 매핑.
+  // 레퍼런스 얼굴 위치 가이드(타원) — 미리보기와 동일 매핑(전면 contain).
   const faceGuide = useMemo(() => {
     const fb = referenceFeatures.bbox;
     if (!fb) return null;
-    const scale = Math.max(W / refImg.w, H / refImg.h);
+    const scale = front
+      ? Math.min(W / refImg.w, H / refImg.h)
+      : Math.max(W / refImg.w, H / refImg.h);
     const dW = refImg.w * scale;
     const dH = refImg.h * scale;
     const offX = (W - dW) / 2;
@@ -214,7 +217,7 @@ export default function ShootScreen() {
       rx: Math.max((fb.w * dW) / 2, 8),
       ry: Math.max((fb.h * dH) / 2, 8),
     };
-  }, [referenceFeatures.bbox, refImg.w, refImg.h, W, H]);
+  }, [referenceFeatures.bbox, refImg.w, refImg.h, W, H, front]);
 
   const [scores, setScores] = useState<MatchScores>(ZERO);
   const [guide, setGuide] = useState('상체가 보이게 서주세요');
@@ -334,7 +337,7 @@ export default function ShootScreen() {
       // 겹칠수록 점수↑ (위치/크기/구도까지 맞춰야 함).
       const lw = Math.min(frame.width, frame.height);
       const lh = Math.max(frame.width, frame.height);
-      const liveScreenUnit = coverUnit(lf.bodyOutline, lw, lh, W, H);
+      const liveScreenUnit = coverUnit(lf.bodyOutline, lw, lh, W, H, front);
       const iou = hasRefSil ? silhouetteIoU(refScreenUnit, liveScreenUnit) : 0;
       const s = hasRefSil
         ? {
@@ -396,6 +399,7 @@ export default function ShootScreen() {
       hasRefSil,
       W,
       H,
+      front,
       report,
       reportDiag,
       triggerShutter,
@@ -425,6 +429,7 @@ export default function ShootScreen() {
         Math.max(live.fw, live.fh),
         W,
         H,
+        front,
       )
     : null;
   const refD = toSmoothPathD(smoothEdges(toPx(refScreenUnit)));
@@ -433,15 +438,16 @@ export default function ShootScreen() {
   const liveFacePt =
     live && hasFace
       ? (() => {
-          const lw = Math.min(live.fw, live.fh);
-          const lh = Math.max(live.fw, live.fh);
-          const scale = Math.max(W / lw, H / lh);
-          const dW = lw * scale;
-          const dH = lh * scale;
-          return {
-            x: (W - dW) / 2 + live.cx * dW,
-            y: (H - dH) / 2 + live.cy * dH,
-          };
+          const p = coverPoint(
+            live.cx,
+            live.cy,
+            Math.min(live.fw, live.fh),
+            Math.max(live.fw, live.fh),
+            W,
+            H,
+            front,
+          );
+          return { x: p.x * W, y: p.y * H };
         })()
       : null;
   const faceOk =
@@ -467,6 +473,7 @@ export default function ShootScreen() {
           style={StyleSheet.absoluteFill}
           device={device}
           format={format}
+          resizeMode={front ? 'contain' : 'cover'}
           isActive={!capturing}
           photo
           frameProcessor={frameProcessor}
