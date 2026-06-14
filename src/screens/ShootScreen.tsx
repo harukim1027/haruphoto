@@ -83,6 +83,16 @@ interface LiveData {
   fh: number;
 }
 
+// 매 프레임 검출 상태(얼굴이 안 잡혀도 항상 갱신) — 진단용
+interface Diag {
+  found: boolean;
+  noFace: boolean;
+  contourN: number;
+  poseN: number;
+  fw: number;
+  fh: number;
+}
+
 // 정규화 top-left 점들 → 화면 좌표 (cover crop 보정).
 function toScreenContour(
   pts: Pt[] | undefined,
@@ -147,6 +157,7 @@ export default function ShootScreen() {
   const [guide, setGuide] = useState('상체가 보이게 서주세요');
   const [hasFace, setHasFace] = useState(false);
   const [live, setLive] = useState<LiveData | null>(null);
+  const [diag, setDiag] = useState<Diag | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [debug, setDebug] = useState(true);
 
@@ -154,21 +165,16 @@ export default function ShootScreen() {
   const startZoom = useRef(device?.neutralZoom ?? 1);
   useEffect(() => {
     if (!device) return;
+    // 요구 #4: 렌즈가 바뀌면 줌 범위도 다르므로 neutralZoom 으로 리셋
     setZoom(device.neutralZoom);
-    // 사용자 요청 #2: 실제 device 값 로그
+    startZoom.current = device.neutralZoom;
+    // 요구 #1(문제2): 전면/후면 device 값 로그
     console.log(
-      '[device]',
-      position,
-      'min=',
-      device.minZoom,
-      'neutral=',
-      device.neutralZoom,
-      'max=',
-      device.maxZoom,
-      'lenses=',
-      device.physicalDevices,
-      'id=',
-      device.id,
+      `[device] ${position}:`,
+      'min=', device.minZoom,
+      'neutral=', device.neutralZoom,
+      'max=', device.maxZoom,
+      'lenses=', device.physicalDevices,
     );
   }, [device, position]);
   const pinch = Gesture.Pinch()
@@ -183,6 +189,7 @@ export default function ShootScreen() {
   const highSince = useSharedValue(0);
   const cooldownUntil = useSharedValue(0);
   const lastReport = useSharedValue(0);
+  const lastLog = useSharedValue(0);
 
   useEffect(() => {
     if (!hasPermission) requestPermission();
@@ -213,6 +220,7 @@ export default function ShootScreen() {
       setLive(ld);
     },
   );
+  const reportDiag = Worklets.createRunOnJS((d: Diag) => setDiag(d));
   const triggerShutter = Worklets.createRunOnJS(() => capture());
 
   const frameProcessor = useFrameProcessor(
@@ -221,6 +229,29 @@ export default function ShootScreen() {
       const raw = facePlugin?.call(frame) as unknown as FaceVisionResult | undefined;
       const lf = raw ? toFaceFeatures(raw) : null;
       const now = Date.now();
+
+      // 진단(요구 #1): 얼굴 랜드마크/윤곽이 라이브 프레임 프로세서까지 들어오는가?
+      // 얼굴이 안 잡혀도 매 프레임 상태를 찍는다. (레퍼런스 경로와 별개)
+      if (now - lastLog.value > 500) {
+        lastLog.value = now;
+        const cN = raw?.faceContour?.length ?? 0;
+        const pN = raw?.pose ? Object.keys(raw.pose).length : 0;
+        console.log(
+          '[shoot] found=', raw?.found,
+          'noFace=', raw?.noFace,
+          'faceContour=', cN,
+          'pose=', pN,
+          'frame=', frame.width, 'x', frame.height,
+        );
+        reportDiag({
+          found: !!raw?.found,
+          noFace: !!raw?.noFace,
+          contourN: cN,
+          poseN: pN,
+          fw: frame.width,
+          fh: frame.height,
+        });
+      }
 
       if (!lf) {
         highSince.value = 0;
@@ -268,7 +299,7 @@ export default function ShootScreen() {
         });
       }
     },
-    [referenceFeatures, report, triggerShutter],
+    [referenceFeatures, report, reportDiag, triggerShutter],
   );
 
   if (!hasPermission || device == null) {
@@ -349,10 +380,9 @@ export default function ShootScreen() {
             {device.neutralZoom.toFixed(3)} max={device.maxZoom.toFixed(1)}
             {'\n'}lenses=[{device.physicalDevices.join(',')}]
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
-            {'\n'}live face cx{live?.cx.toFixed(2) ?? '-'} cy{live?.cy.toFixed(2) ?? '-'} size
-            {live?.size.toFixed(2) ?? '-'} | 관절 {live?.poseCount ?? 0} | 윤곽{' '}
-            {live?.faceContour?.length ?? 0} | frame{' '}
-            {live ? `${live.fw}x${live.fh}` : '-'}
+            {'\n'}FACE found={diag?.found ? 'Y' : 'N'} noFace={diag?.noFace ? 'Y' : 'N'}{' '}
+            윤곽={diag?.contourN ?? 0} 관절={diag?.poseN ?? 0} frame=
+            {diag ? `${diag.fw}x${diag.fh}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>
         </Pressable>
