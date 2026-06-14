@@ -35,17 +35,15 @@ import {
   placeUnit,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
-import { Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
+import Svg, { Circle as SvgCircle, Polygon } from 'react-native-svg';
 import type { RootStackParamList } from '../../App';
 
-// 화면 픽셀 점들 → 닫힌 Skia path.
-function mkClosed(pts: Pt[] | null | undefined) {
+// 화면 픽셀 점들 → SVG points 문자열("x,y x,y ...").
+function svgPoints(pts: Pt[] | null | undefined): string | null {
   if (!pts || pts.length < 3) return null;
-  const p = Skia.Path.Make();
-  p.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i].x, pts[i].y);
-  p.close();
-  return p;
+  let s = '';
+  for (const p of pts) s += `${p.x.toFixed(1)},${p.y.toFixed(1)} `;
+  return s.trim();
 }
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -326,8 +324,8 @@ export default function ShootScreen() {
         Math.max(live.fw, live.fh),
       )
     : null;
-  const refPath = mkClosed(placeUnit(refUnitSil, W, H));
-  const livePath = mkClosed(placeUnit(liveUnitSil, W, H));
+  const refPts = svgPoints(placeUnit(refUnitSil, W, H));
+  const livePts = svgPoints(placeUnit(liveUnitSil, W, H));
   const iouVal = live?.iou ?? 0;
   const iouColor =
     iouVal >= POSE_IOU_GOOD
@@ -353,31 +351,33 @@ export default function ShootScreen() {
         />
       </GestureDetector>
 
-      {/* 실루엣 오버레이 — 단일 Canvas. 마젠타 마커=Canvas 렌더 확인용. */}
-      <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
-        <Circle cx={24} cy={H * 0.4} r={12} color="magenta" />
-        {refPath && iouFill && (
-          <Path path={refPath} style="fill" color={iouFill} />
-        )}
-        {refPath && (
-          <Path
-            path={refPath}
-            style="stroke"
-            color={iouColor}
+      {/* 실루엣 오버레이 — SVG(일반 UIView)라 카메라 위에 정상 합성됨. */}
+      <Svg
+        style={StyleSheet.absoluteFill}
+        width={W}
+        height={H}
+        pointerEvents="none"
+      >
+        <SvgCircle cx={24} cy={H * 0.4} r={12} fill="magenta" />
+        {refPts && (
+          <Polygon
+            points={refPts}
+            fill={iouFill}
+            stroke={iouColor}
             strokeWidth={4}
-            strokeJoin="round"
+            strokeLinejoin="round"
           />
         )}
-        {livePath && (
-          <Path
-            path={livePath}
-            style="stroke"
-            color="#00E08A"
+        {livePts && (
+          <Polygon
+            points={livePts}
+            fill="none"
+            stroke="#00E08A"
             strokeWidth={2}
-            strokeJoin="round"
+            strokeLinejoin="round"
           />
         )}
-      </Canvas>
+      </Svg>
 
       <View pointerEvents="none" style={styles.guideWrap}>
         <Text style={styles.guideText}>{guide}</Text>
