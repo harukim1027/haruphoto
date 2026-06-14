@@ -30,14 +30,13 @@ import {
 } from '../face/matchFace';
 import { guideText } from '../face/guide';
 import {
-  normalizeSilhouette,
   silhouetteIoU,
-  placeUnit,
+  coverUnit,
   smoothEdges,
   toSmoothPathD,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
-import Svg, { Path as SvgPath } from 'react-native-svg';
+import Svg, { Path as SvgPath, Ellipse, Circle as SvgCircle } from 'react-native-svg';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -115,12 +114,28 @@ export default function ShootScreen() {
   const front = position === 'front';
 
   const refImg = referenceFeatures.imageSize ?? { w: 3, h: 4 };
-  // 레퍼런스 실루엣을 인물 bbox 기준 단위정사각형으로 1회 정규화(캐싱).
-  const refUnitSil = useMemo(
-    () => normalizeSilhouette(referenceFeatures.bodyOutline, refImg.w, refImg.h),
-    [referenceFeatures.bodyOutline, refImg.w, refImg.h],
+  // 레퍼런스 실루엣을 실제 구도대로 화면(cover)에 매핑(캐싱). 고정 사각형 X.
+  const refScreenUnit = useMemo(
+    () => coverUnit(referenceFeatures.bodyOutline, refImg.w, refImg.h, W, H),
+    [referenceFeatures.bodyOutline, refImg.w, refImg.h, W, H],
   );
-  const hasRefSil = !!refUnitSil && refUnitSil.length >= 3;
+  const hasRefSil = !!refScreenUnit && refScreenUnit.length >= 3;
+  // 레퍼런스 얼굴 위치 가이드(타원) — face bbox 를 화면에 cover 매핑.
+  const faceGuide = useMemo(() => {
+    const fb = referenceFeatures.bbox;
+    if (!fb) return null;
+    const scale = Math.max(W / refImg.w, H / refImg.h);
+    const dW = refImg.w * scale;
+    const dH = refImg.h * scale;
+    const offX = (W - dW) / 2;
+    const offY = (H - dH) / 2;
+    return {
+      cx: offX + (fb.x + fb.w / 2) * dW,
+      cy: offY + (fb.y + fb.h / 2) * dH,
+      rx: Math.max((fb.w * dW) / 2, 8),
+      ry: Math.max((fb.h * dH) / 2, 8),
+    };
+  }, [referenceFeatures.bbox, refImg.w, refImg.h, W, H]);
 
   const [scores, setScores] = useState<MatchScores>(ZERO);
   const [guide, setGuide] = useState('상체가 보이게 서주세요');
@@ -235,11 +250,12 @@ export default function ShootScreen() {
       }
 
       const s0 = matchFace(referenceFeatures, lf);
-      // 실루엣 IoU(주력 매칭) — 레퍼런스/라이브를 각자 bbox 기준 정규화 후 겹침 비교.
+      // 실루엣 IoU(주력 매칭) — 둘 다 화면(cover)에 매핑한 뒤 실제 겹침 비교.
+      // 겹칠수록 점수↑ (위치/크기/구도까지 맞춰야 함).
       const lw = Math.min(frame.width, frame.height);
       const lh = Math.max(frame.width, frame.height);
-      const liveUnit = normalizeSilhouette(lf.bodyOutline, lw, lh);
-      const iou = hasRefSil ? silhouetteIoU(refUnitSil, liveUnit) : 0;
+      const liveScreenUnit = coverUnit(lf.bodyOutline, lw, lh, W, H);
+      const iou = hasRefSil ? silhouetteIoU(refScreenUnit, liveScreenUnit) : 0;
       const s = hasRefSil
         ? {
             ...s0,
@@ -294,7 +310,16 @@ export default function ShootScreen() {
         });
       }
     },
-    [referenceFeatures, refUnitSil, hasRefSil, report, reportDiag, triggerShutter],
+    [
+      referenceFeatures,
+      refScreenUnit,
+      hasRefSil,
+      W,
+      H,
+      report,
+      reportDiag,
+      triggerShutter,
+    ],
   );
 
   if (!hasPermission || device == null) {
@@ -310,16 +335,40 @@ export default function ShootScreen() {
   const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device));
   const activeMul = zoomToDisplay(zoom, device);
 
-  // 레퍼런스(고정 목표)·라이브 실루엣을 같은 단위정사각형 → 화면 타깃에 배치.
-  const liveUnitSil = live
-    ? normalizeSilhouette(
+  // 실제 구도대로 화면에 매핑된 실루엣(스무딩 + 곡선 path).
+  const toPx = (u: Pt[] | null) =>
+    u ? u.map((p) => ({ x: p.x * W, y: p.y * H })) : null;
+  const liveScreenUnit = live
+    ? coverUnit(
         live.bodyOutline,
         Math.min(live.fw, live.fh),
         Math.max(live.fw, live.fh),
+        W,
+        H,
       )
     : null;
-  const refD = toSmoothPathD(smoothEdges(placeUnit(refUnitSil, W, H)));
-  const liveD = toSmoothPathD(smoothEdges(placeUnit(liveUnitSil, W, H)));
+  const refD = toSmoothPathD(smoothEdges(toPx(refScreenUnit)));
+  const liveD = toSmoothPathD(smoothEdges(toPx(liveScreenUnit)));
+  // 내 얼굴 위치(프레이밍 중심) → 화면 점. 레퍼런스 얼굴 타원과 맞추도록 유도.
+  const liveFacePt =
+    live && hasFace
+      ? (() => {
+          const lw = Math.min(live.fw, live.fh);
+          const lh = Math.max(live.fw, live.fh);
+          const scale = Math.max(W / lw, H / lh);
+          const dW = lw * scale;
+          const dH = lh * scale;
+          return {
+            x: (W - dW) / 2 + live.cx * dW,
+            y: (H - dH) / 2 + live.cy * dH,
+          };
+        })()
+      : null;
+  const faceOk =
+    faceGuide && liveFacePt
+      ? Math.hypot(liveFacePt.x - faceGuide.cx, liveFacePt.y - faceGuide.cy) <
+        faceGuide.rx
+      : false;
   const iouVal = live?.iou ?? 0;
   const iouColor =
     iouVal >= POSE_IOU_GOOD
@@ -352,7 +401,7 @@ export default function ShootScreen() {
         height={H}
         pointerEvents="none"
       >
-        {/* 레퍼런스(고정 목표): 반투명 채움 + 외곽선. "여기 몸을 맞춰라" */}
+        {/* 레퍼런스(목표): 반투명 채움 + 외곽선. 실제 구도 위치. "여기 몸을 맞춰라" */}
         {refD && (
           <SvgPath
             d={refD}
@@ -370,6 +419,28 @@ export default function ShootScreen() {
             stroke="rgba(255,255,255,0.85)"
             strokeWidth={2}
             strokeLinejoin="round"
+          />
+        )}
+        {/* 얼굴 위치 가이드(목표 타원) */}
+        {faceGuide && (
+          <Ellipse
+            cx={faceGuide.cx}
+            cy={faceGuide.cy}
+            rx={faceGuide.rx}
+            ry={faceGuide.ry}
+            fill="none"
+            stroke={faceOk ? '#00E08A' : '#22D3EE'}
+            strokeWidth={3}
+            strokeDasharray="10 8"
+          />
+        )}
+        {/* 내 얼굴 중심(여기를 타원에 맞춰라) */}
+        {liveFacePt && (
+          <SvgCircle
+            cx={liveFacePt.x}
+            cy={liveFacePt.y}
+            r={10}
+            fill={faceOk ? '#00E08A' : 'rgba(34,211,238,0.9)'}
           />
         )}
       </Svg>
@@ -390,7 +461,7 @@ export default function ShootScreen() {
             {'\n'}lenses=[{device.physicalDevices.join(',')}]
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
             {'\n'}FACE found={diag?.found ? 'Y' : 'N'} 실루엣={diag?.silN ?? 0} refSil=
-            {hasRefSil ? refUnitSil!.length : 0} IoU={Math.round(iouVal * 100)}{' '}
+            {hasRefSil ? refScreenUnit!.length : 0} IoU={Math.round(iouVal * 100)}{' '}
             frame={diag ? `${diag.fw}x${diag.fh}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>

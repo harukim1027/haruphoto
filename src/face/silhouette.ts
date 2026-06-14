@@ -71,6 +71,29 @@ export function silhouetteIoU(
   return uni === 0 ? 0 : inter / uni;
 }
 
+// 이미지 정규화 top-left 점들 → resizeMode="cover" 화면 정규화 [0,1].
+// 레퍼런스/라이브를 같은 화면 좌표계로 매핑(실제 구도 위치 보존) → 겹침(IoU) 직관적.
+export function coverUnit(
+  pts: Pt[] | null | undefined,
+  imgW: number,
+  imgH: number,
+  W: number,
+  H: number,
+): Pt[] | null {
+  'worklet';
+  if (!pts || pts.length < 3 || imgW <= 0 || imgH <= 0 || W <= 0 || H <= 0)
+    return null;
+  const scale = Math.max(W / imgW, H / imgH);
+  const dW = imgW * scale;
+  const dH = imgH * scale;
+  const offX = (W - dW) / 2;
+  const offY = (H - dH) / 2;
+  return pts.map((p) => ({
+    x: (offX + p.x * dW) / W,
+    y: (offY + p.y * dH) / H,
+  }));
+}
+
 // 단위정사각형 좌표 → 화면 픽셀(고정 타깃 사각 영역). 위치/크기 가이드.
 export function placeUnit(
   unit: Pt[] | null,
