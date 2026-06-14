@@ -27,13 +27,7 @@ import {
   type PoseJoints,
   type Pt,
 } from '../face/types';
-import {
-  matchFace,
-  MATCH_THRESHOLD,
-  SHUTTER_COOLDOWN_MS,
-  SHUTTER_HOLD_MS,
-  type MatchScores,
-} from '../face/matchFace';
+import { matchFace, MATCH_THRESHOLD, type MatchScores } from '../face/matchFace';
 import { guideText } from '../face/guide';
 import {
   silhouetteIoU,
@@ -300,8 +294,6 @@ export default function ShootScreen() {
         setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
     });
 
-  const highSince = useSharedValue(0);
-  const cooldownUntil = useSharedValue(0);
   const lastReport = useSharedValue(0);
   const lastLog = useSharedValue(0);
 
@@ -335,7 +327,6 @@ export default function ShootScreen() {
     },
   );
   const reportDiag = Worklets.createRunOnJS((d: Diag) => setDiag(d));
-  const triggerShutter = Worklets.createRunOnJS(() => capture());
 
   const frameProcessor = useFrameProcessor(
     (frame) => {
@@ -376,7 +367,6 @@ export default function ShootScreen() {
       }
 
       if (!lf) {
-        highSince.value = 0;
         if (now - lastReport.value > 150) {
           lastReport.value = now;
           report(ZERO, '사람이 보이지 않아요', false, null);
@@ -410,26 +400,7 @@ export default function ShootScreen() {
               s0.gaze * 0.06,
           }
         : s0;
-      // 실루엣 매칭이 가능하면 셔터는 IoU 기준, 아니면 기존 얼굴 기준.
-      const allGood = hasRefSil
-        ? iou >= POSE_IOU_GOOD
-        : s0.framing >= MATCH_THRESHOLD &&
-          s0.orientation >= MATCH_THRESHOLD &&
-          s0.expression >= MATCH_THRESHOLD &&
-          s0.gaze >= MATCH_THRESHOLD;
-
-      if (now >= cooldownUntil.value) {
-        if (allGood) {
-          if (highSince.value === 0) highSince.value = now;
-          if (now - highSince.value >= SHUTTER_HOLD_MS) {
-            highSince.value = 0;
-            cooldownUntil.value = now + SHUTTER_COOLDOWN_MS;
-            triggerShutter();
-          }
-        } else {
-          highSince.value = 0;
-        }
-      }
+      // 자동 셔터 제거 — 점수/가이드만 갱신, 촬영은 수동 셔터 버튼만.
 
       if (now - lastReport.value > 120) {
         lastReport.value = now;
@@ -461,7 +432,6 @@ export default function ShootScreen() {
       front,
       report,
       reportDiag,
-      triggerShutter,
     ],
   );
 
