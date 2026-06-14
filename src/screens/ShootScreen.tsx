@@ -33,18 +33,12 @@ import {
   normalizeSilhouette,
   silhouetteIoU,
   placeUnit,
+  smoothEdges,
+  toSmoothPathD,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
-import Svg, { Circle as SvgCircle, Polygon } from 'react-native-svg';
+import Svg, { Path as SvgPath } from 'react-native-svg';
 import type { RootStackParamList } from '../../App';
-
-// 화면 픽셀 점들 → SVG points 문자열("x,y x,y ...").
-function svgPoints(pts: Pt[] | null | undefined): string | null {
-  if (!pts || pts.length < 3) return null;
-  let s = '';
-  for (const p of pts) s += `${p.x.toFixed(1)},${p.y.toFixed(1)} `;
-  return s.trim();
-}
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
 type Rt = RouteProp<RootStackParamList, 'Shoot'>;
@@ -324,8 +318,8 @@ export default function ShootScreen() {
         Math.max(live.fw, live.fh),
       )
     : null;
-  const refPts = svgPoints(placeUnit(refUnitSil, W, H));
-  const livePts = svgPoints(placeUnit(liveUnitSil, W, H));
+  const refD = toSmoothPathD(smoothEdges(placeUnit(refUnitSil, W, H)));
+  const liveD = toSmoothPathD(smoothEdges(placeUnit(liveUnitSil, W, H)));
   const iouVal = live?.iou ?? 0;
   const iouColor =
     iouVal >= POSE_IOU_GOOD
@@ -334,7 +328,7 @@ export default function ShootScreen() {
         ? '#FFD400'
         : 'rgba(255,255,255,0.9)';
   const iouFill =
-    iouVal >= POSE_IOU_GOOD ? 'rgba(0,224,138,0.22)' : 'rgba(255,255,255,0.18)';
+    iouVal >= POSE_IOU_GOOD ? 'rgba(0,224,138,0.30)' : 'rgba(255,255,255,0.22)';
 
   return (
     <View style={styles.container}>
@@ -351,28 +345,29 @@ export default function ShootScreen() {
         />
       </GestureDetector>
 
-      {/* 실루엣 오버레이 — SVG(일반 UIView)라 카메라 위에 정상 합성됨. */}
+      {/* 실루엣 오버레이 — SVG(일반 UIView)라 카메라 위에 정상 합성됨. 부드러운 곡선. */}
       <Svg
         style={StyleSheet.absoluteFill}
         width={W}
         height={H}
         pointerEvents="none"
       >
-        <SvgCircle cx={24} cy={H * 0.4} r={12} fill="magenta" />
-        {refPts && (
-          <Polygon
-            points={refPts}
+        {/* 레퍼런스(고정 목표): 반투명 채움 + 외곽선. "여기 몸을 맞춰라" */}
+        {refD && (
+          <SvgPath
+            d={refD}
             fill={iouFill}
             stroke={iouColor}
-            strokeWidth={4}
+            strokeWidth={5}
             strokeLinejoin="round"
           />
         )}
-        {livePts && (
-          <Polygon
-            points={livePts}
+        {/* 내 실시간 실루엣: 얇은 흰색 외곽선 */}
+        {liveD && (
+          <SvgPath
+            d={liveD}
             fill="none"
-            stroke="#00E08A"
+            stroke="rgba(255,255,255,0.85)"
             strokeWidth={2}
             strokeLinejoin="round"
           />
