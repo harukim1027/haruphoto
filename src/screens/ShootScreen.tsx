@@ -113,6 +113,18 @@ export default function ShootScreen() {
   const cameraRef = useRef<Camera>(null);
   const front = position === 'front';
 
+  // 전면 "0.5x"(풀센서 와이드)는 별도 렌즈가 아니라 가장 넓은 화각(FOV) 포맷.
+  // → 전면은 device.formats 중 fieldOfView 최대 포맷을 골라 가장 넓게.
+  const format = useMemo(() => {
+    if (!device || position !== 'front') return undefined;
+    let best: (typeof device.formats)[number] | undefined;
+    for (const f of device.formats) {
+      if (f.videoHeight < 720) continue; // 너무 저해상 제외
+      if (!best || f.fieldOfView > best.fieldOfView) best = f;
+    }
+    return best;
+  }, [device, position]);
+
   const refImg = referenceFeatures.imageSize ?? { w: 3, h: 4 };
   // 레퍼런스 실루엣을 실제 구도대로 화면(cover)에 매핑(캐싱). 고정 사각형 X.
   const refScreenUnit = useMemo(
@@ -386,6 +398,7 @@ export default function ShootScreen() {
           ref={cameraRef}
           style={StyleSheet.absoluteFill}
           device={device}
+          format={format}
           isActive={!capturing}
           photo
           frameProcessor={frameProcessor}
@@ -458,7 +471,8 @@ export default function ShootScreen() {
           <Text style={styles.debugText}>
             DEVICE {position} min={device.minZoom.toFixed(3)} neutral=
             {device.neutralZoom.toFixed(3)} max={device.maxZoom.toFixed(1)}
-            {'\n'}lenses=[{device.physicalDevices.join(',')}]
+            {'\n'}lenses=[{device.physicalDevices.join(',')}] FOV=
+            {format ? `${format.fieldOfView.toFixed(0)}° ${format.videoWidth}x${format.videoHeight}` : 'default'}
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
             {'\n'}FACE found={diag?.found ? 'Y' : 'N'} 실루엣={diag?.silN ?? 0} refSil=
             {hasRefSil ? refScreenUnit!.length : 0} IoU={Math.round(iouVal * 100)}{' '}
