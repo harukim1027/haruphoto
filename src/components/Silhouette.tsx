@@ -40,20 +40,36 @@ function bodyPath(j: ScreenJoints) {
  */
 export default function Silhouette({
   faceContour,
+  bodyOutline,
   joints,
   color,
   width = 3,
 }: {
   faceContour?: Pt[];
+  bodyOutline?: Pt[]; // 인물 분할 실루엣(있으면 관절 막대기 대신 이걸 그림)
   joints?: ScreenJoints;
   color: string;
   width?: number;
 }) {
   const face = useMemo(() => closedPath(faceContour), [faceContour]);
-  const body = useMemo(() => (joints ? bodyPath(joints) : null), [joints]);
-  if (!face && !body) return null;
+  const silhouette = useMemo(() => closedPath(bodyOutline), [bodyOutline]);
+  // 실루엣이 있으면 막대기는 생략(자세를 몸 외곽선으로 보여줌)
+  const body = useMemo(
+    () => (!bodyOutline && joints ? bodyPath(joints) : null),
+    [bodyOutline, joints],
+  );
+  if (!face && !silhouette && !body) return null;
   return (
     <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+      {silhouette && (
+        <Path
+          path={silhouette}
+          style="stroke"
+          color={color}
+          strokeWidth={width}
+          strokeJoin="round"
+        />
+      )}
       {face && (
         <Path
           path={face}

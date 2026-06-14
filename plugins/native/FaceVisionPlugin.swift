@@ -10,6 +10,7 @@
 import Foundation
 import Vision
 import CoreMedia
+import CoreVideo
 import VisionCamera
 
 @objc(FaceVisionPlugin)
@@ -26,22 +27,74 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     let orientation = cgOrientation(from: frame.orientation)
     let faceReq = VNDetectFaceLandmarksRequest()
     let poseReq = VNDetectHumanBodyPoseRequest()
+    var reqs: [VNRequest] = [faceReq, poseReq]
+    var segReq: VNGeneratePersonSegmentationRequest?
+    if #available(iOS 15.0, *) {
+      let s = VNGeneratePersonSegmentationRequest()
+      s.qualityLevel = .fast // 라이브 → 속도 우선
+      s.outputPixelFormat = kCVPixelFormatType_OneComponent8
+      segReq = s
+      reqs.append(s)
+    }
     let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
     do {
-      try handler.perform([faceReq, poseReq])
+      try handler.perform(reqs)
     } catch {
       return ["found": false]
     }
     let pose = Self.poseJoints(poseReq.results?.first)
+    var bodyOutline: [[Double]]?
+    if #available(iOS 15.0, *),
+       let seg = segReq?.results?.first as? VNPixelBufferObservation {
+      bodyOutline = Self.bodySilhouette(seg.pixelBuffer)
+    }
+    func finalize(_ base: [String: Any]) -> [String: Any] {
+      var r = base
+      if let pose = pose { r["pose"] = pose }
+      if let b = bodyOutline { r["bodyOutline"] = b }
+      return r
+    }
     guard let face = (faceReq.results)?.first else {
-      if let pose = pose {
-        return ["found": true, "noFace": true, "mirrored": frame.isMirrored, "pose": pose]
+      if pose != nil || bodyOutline != nil {
+        return finalize(["found": true, "noFace": true, "mirrored": frame.isMirrored])
       }
       return ["found": false]
     }
-    var result = Self.features(from: face, mirrored: frame.isMirrored)
-    if let pose = pose { result["pose"] = pose }
-    return result
+    return finalize(Self.features(from: face, mirrored: frame.isMirrored))
+  }
+
+  /// 인물 분할 마스크 → 몸 실루엣 외곽 폴리곤 (top-left 정규화, 닫힌 형태).
+  static func bodySilhouette(_ mask: CVPixelBuffer) -> [[Double]]? {
+    CVPixelBufferLockBaseAddress(mask, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+    let w = CVPixelBufferGetWidth(mask)
+    let h = CVPixelBufferGetHeight(mask)
+    guard w > 2, h > 2, let base = CVPixelBufferGetBaseAddress(mask) else { return nil }
+    let bpr = CVPixelBufferGetBytesPerRow(mask)
+    let ptr = base.assumingMemoryBound(to: UInt8.self)
+    let thr: UInt8 = 128
+    let rows = min(56, h)
+    var left: [[Double]] = []
+    var right: [[Double]] = []
+    for i in 0..<rows {
+      let y = Int(Double(i) / Double(rows - 1) * Double(h - 1))
+      let rowPtr = ptr + y * bpr
+      var minX = -1, maxX = -1
+      var x = 0
+      while x < w {
+        if rowPtr[x] >= thr { if minX < 0 { minX = x }; maxX = x }
+        x += 2
+      }
+      if minX >= 0 {
+        let ny = Double(y) / Double(h - 1)
+        left.append([Double(minX) / Double(w - 1), ny])
+        right.append([Double(maxX) / Double(w - 1), ny])
+      }
+    }
+    if left.count < 3 { return nil }
+    var poly = left
+    poly.append(contentsOf: right.reversed())
+    return poly
   }
 
   /// 상체 관절 → top-left 정규화 + 신뢰도

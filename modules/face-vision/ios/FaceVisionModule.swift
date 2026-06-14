@@ -7,6 +7,7 @@
 import ExpoModulesCore
 import Vision
 import UIKit
+import CoreVideo
 
 public class FaceVisionModule: Module {
   public func definition() -> ModuleDefinition {
@@ -22,13 +23,22 @@ public class FaceVisionModule: Module {
       }
       let faceReq = VNDetectFaceLandmarksRequest()
       let poseReq = VNDetectHumanBodyPoseRequest()
+      var reqs: [VNRequest] = [faceReq, poseReq]
+      var segReq: VNGeneratePersonSegmentationRequest?
+      if #available(iOS 15.0, *) {
+        let s = VNGeneratePersonSegmentationRequest()
+        s.qualityLevel = .balanced // 정지이미지 → 품질 우선
+        s.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        segReq = s
+        reqs.append(s)
+      }
       let handler = VNImageRequestHandler(
         cgImage: cg,
         orientation: Self.cgOrientation(image.imageOrientation),
         options: [:]
       )
       do {
-        try handler.perform([faceReq, poseReq])
+        try handler.perform(reqs)
       } catch {
         return ["found": false, "err": "vision_failed: \(error.localizedDescription)"]
       }
@@ -38,18 +48,63 @@ public class FaceVisionModule: Module {
       let upW = isSide ? cg.height : cg.width
       let upH = isSide ? cg.width : cg.height
       let pose = Self.poseJoints(poseReq.results?.first)
+      var bodyOutline: [[Double]]?
+      if #available(iOS 15.0, *),
+         let seg = segReq?.results?.first as? VNPixelBufferObservation {
+        bodyOutline = Self.bodySilhouette(seg.pixelBuffer)
+      }
+      // 공통: pose / bodyOutline 주입
+      func finalize(_ base: [String: Any]) -> [String: Any] {
+        var r = base
+        if let pose = pose { r["pose"] = pose }
+        if let b = bodyOutline { r["bodyOutline"] = b }
+        return r
+      }
       guard let face = faceReq.results?.first else {
-        // 얼굴이 없어도 상체 포즈가 있으면 반신으로 인정
-        if let pose = pose {
-          return ["found": true, "faceOnly": false, "noFace": true,
-                  "imgW": Double(upW), "imgH": Double(upH), "pose": pose]
+        // 얼굴이 없어도 상체 포즈/실루엣이 있으면 반신으로 인정
+        if pose != nil || bodyOutline != nil {
+          return finalize(["found": true, "faceOnly": false, "noFace": true,
+                           "imgW": Double(upW), "imgH": Double(upH)])
         }
         return ["found": false, "err": "no_face", "imgW": Double(upW), "imgH": Double(upH)]
       }
-      var result = Self.features(from: face, imgW: upW, imgH: upH)
-      if let pose = pose { result["pose"] = pose }
-      return result
+      return finalize(Self.features(from: face, imgW: upW, imgH: upH))
     }
+  }
+
+  /// 인물 분할 마스크 → 몸 실루엣 외곽 폴리곤 (top-left 정규화, 닫힌 형태).
+  /// 행 스캔: 각 행의 최좌/최우 인물 픽셀 → 왼쪽 모서리(위→아래) + 오른쪽(아래→위).
+  static func bodySilhouette(_ mask: CVPixelBuffer) -> [[Double]]? {
+    CVPixelBufferLockBaseAddress(mask, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+    let w = CVPixelBufferGetWidth(mask)
+    let h = CVPixelBufferGetHeight(mask)
+    guard w > 2, h > 2, let base = CVPixelBufferGetBaseAddress(mask) else { return nil }
+    let bpr = CVPixelBufferGetBytesPerRow(mask)
+    let ptr = base.assumingMemoryBound(to: UInt8.self)
+    let thr: UInt8 = 128
+    let rows = min(56, h) // 샘플 행 수
+    var left: [[Double]] = []
+    var right: [[Double]] = []
+    for i in 0..<rows {
+      let y = Int(Double(i) / Double(rows - 1) * Double(h - 1))
+      let rowPtr = ptr + y * bpr
+      var minX = -1, maxX = -1
+      var x = 0
+      while x < w {
+        if rowPtr[x] >= thr { if minX < 0 { minX = x }; maxX = x }
+        x += 2 // 가로 2px 스텝(비용 절감)
+      }
+      if minX >= 0 {
+        let ny = Double(y) / Double(h - 1)
+        left.append([Double(minX) / Double(w - 1), ny])
+        right.append([Double(maxX) / Double(w - 1), ny])
+      }
+    }
+    if left.count < 3 { return nil }
+    var poly = left
+    poly.append(contentsOf: right.reversed()) // 닫힌 폴리곤
+    return poly
   }
 
   /// 상체 관절(목/어깨/팔꿈치/손목/골반중심) → top-left 정규화 + 신뢰도

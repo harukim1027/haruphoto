@@ -75,6 +75,7 @@ const ZERO: MatchScores = {
 interface LiveData {
   pose?: PoseJoints; // un-mirror 보정됨 (프리뷰 사용자 몸 위치에 일치)
   faceContour?: Pt[]; // un-mirror 보정된 얼굴 외곽
+  bodyOutline?: Pt[]; // un-mirror 보정된 몸 실루엣
   cx: number;
   cy: number;
   size: number;
@@ -89,6 +90,7 @@ interface Diag {
   noFace: boolean;
   contourN: number;
   poseN: number;
+  silN: number;
   fw: number;
   fh: number;
 }
@@ -236,11 +238,13 @@ export default function ShootScreen() {
         lastLog.value = now;
         const cN = raw?.faceContour?.length ?? 0;
         const pN = raw?.pose ? Object.keys(raw.pose).length : 0;
+        const sN = raw?.bodyOutline?.length ?? 0;
         console.log(
           '[shoot] found=', raw?.found,
           'noFace=', raw?.noFace,
           'faceContour=', cN,
           'pose=', pN,
+          'silhouette=', sN,
           'frame=', frame.width, 'x', frame.height,
         );
         reportDiag({
@@ -248,6 +252,7 @@ export default function ShootScreen() {
           noFace: !!raw?.noFace,
           contourN: cN,
           poseN: pN,
+          silN: sN,
           fw: frame.width,
           fh: frame.height,
         });
@@ -290,6 +295,7 @@ export default function ShootScreen() {
         report(s, g, true, {
           pose: lf.pose,
           faceContour: lf.faceContour,
+          bodyOutline: lf.bodyOutline,
           cx: lf.framing.cx,
           cy: lf.framing.cy,
           size: lf.framing.size,
@@ -327,9 +333,17 @@ export default function ShootScreen() {
     W,
     H,
   );
+  const targetBody = toScreenContour(
+    referenceFeatures.bodyOutline,
+    refImg.w,
+    refImg.h,
+    W,
+    H,
+  );
   const liveFace = toScreenContour(live?.faceContour, liveW, liveH, W, H);
-  const hasTarget = targetFace || Object.keys(targetJoints).length > 0;
-  const hasLive = liveFace || Object.keys(liveJoints).length > 0;
+  const liveBody = toScreenContour(live?.bodyOutline, liveW, liveH, W, H);
+  const hasTarget = targetFace || targetBody || Object.keys(targetJoints).length > 0;
+  const hasLive = liveFace || liveBody || Object.keys(liveJoints).length > 0;
 
   return (
     <View style={styles.container}>
@@ -350,15 +364,17 @@ export default function ShootScreen() {
       {hasTarget && (
         <Silhouette
           faceContour={targetFace}
+          bodyOutline={targetBody}
           joints={targetJoints}
           color="rgba(255,255,255,0.7)"
           width={4}
         />
       )}
-      {/* 내 실시간 윤곽: 초록 (얼굴/포즈 데이터 있을 때만) */}
+      {/* 내 실시간 윤곽: 초록 (얼굴/포즈/실루엣 데이터 있을 때만) */}
       {hasLive && (
         <Silhouette
           faceContour={liveFace}
+          bodyOutline={liveBody}
           joints={liveJoints}
           color="#00E08A"
           width={3}
@@ -381,8 +397,8 @@ export default function ShootScreen() {
             {'\n'}lenses=[{device.physicalDevices.join(',')}]
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
             {'\n'}FACE found={diag?.found ? 'Y' : 'N'} noFace={diag?.noFace ? 'Y' : 'N'}{' '}
-            윤곽={diag?.contourN ?? 0} 관절={diag?.poseN ?? 0} frame=
-            {diag ? `${diag.fw}x${diag.fh}` : '-'}
+            윤곽={diag?.contourN ?? 0} 관절={diag?.poseN ?? 0} 실루엣={diag?.silN ?? 0}{' '}
+            frame={diag ? `${diag.fw}x${diag.fh}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>
         </Pressable>

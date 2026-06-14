@@ -88,6 +88,11 @@ export default function ReferencePickScreen() {
     features?.faceContour && img && features.faceContour.length >= 3
       ? features.faceContour.map((p) => mapCover(p.x, p.y, img.w, img.h, previewW, previewH))
       : undefined;
+  // 몸 실루엣 외곽 — cover 매핑
+  const bodyOutlineScreen =
+    features?.bodyOutline && img && features.bodyOutline.length >= 3
+      ? features.bodyOutline.map((p) => mapCover(p.x, p.y, img.w, img.h, previewW, previewH))
+      : undefined;
 
   return (
     <View style={styles.container}>
@@ -103,9 +108,10 @@ export default function ReferencePickScreen() {
         {uri ? (
           <>
             <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-            {(hasPose || faceContourScreen) && (
+            {(hasPose || faceContourScreen || bodyOutlineScreen) && (
               <Silhouette
                 faceContour={faceContourScreen}
+                bodyOutline={bodyOutlineScreen}
                 joints={poseScreen}
                 color="#22D3EE"
                 width={3}
