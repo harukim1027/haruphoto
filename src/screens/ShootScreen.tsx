@@ -52,6 +52,7 @@ import Svg, {
 } from 'react-native-svg';
 
 // 관절(이미지 정규화) → 화면 픽셀. 미리보기와 동일 매핑(front=contain).
+// flipY: 라이브 포즈는 검출 방향(right)이 display(primary)와 180° 달라 y 반전 필요.
 function poseToScreen(
   pose: PoseJoints | undefined,
   imgW: number,
@@ -59,6 +60,7 @@ function poseToScreen(
   W: number,
   H: number,
   contain: boolean,
+  flipY = false,
 ): Partial<Record<keyof PoseJoints, Pt>> {
   const out: Partial<Record<keyof PoseJoints, Pt>> = {};
   if (!pose) return out;
@@ -71,7 +73,10 @@ function poseToScreen(
   const offY = (H - dH) / 2;
   for (const k of Object.keys(pose) as (keyof PoseJoints)[]) {
     const j = pose[k];
-    if (j && j.c > 0.05) out[k] = { x: offX + j.x * dW, y: offY + j.y * dH };
+    if (j && j.c > 0.05) {
+      const jy = flipY ? 1 - j.y : j.y;
+      out[k] = { x: offX + j.x * dW, y: offY + jy * dH };
+    }
   }
   return out;
 }
@@ -488,8 +493,17 @@ export default function ShootScreen() {
   );
   // 포즈 스켈레톤(자세 매칭 주). 목표=레퍼런스, 라이브=내 관절.
   const refSkel = poseToScreen(referenceFeatures.pose, refImg.w, refImg.h, W, H, front);
+  // 라이브 포즈는 검출 방향(right) 보정 위해 y 반전.
   const liveSkel = live
-    ? poseToScreen(live.pose, Math.min(live.fw, live.fh), Math.max(live.fw, live.fh), W, H, front)
+    ? poseToScreen(
+        live.pose,
+        Math.min(live.fw, live.fh),
+        Math.max(live.fw, live.fh),
+        W,
+        H,
+        front,
+        true,
+      )
     : {};
   // 내 얼굴 위치(프레이밍 중심) → 화면 점. 레퍼런스 얼굴 타원과 맞추도록 유도.
   const liveFacePt =

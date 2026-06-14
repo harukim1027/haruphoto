@@ -31,7 +31,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     var segReq: VNGeneratePersonSegmentationRequest?
     if #available(iOS 15.0, *) {
       let s = VNGeneratePersonSegmentationRequest()
-      s.qualityLevel = .fast // 라이브 → 속도 우선
+      s.qualityLevel = .balanced // 디테일 향상(뭉뚱그림 완화). fps 낮으면 .fast 로.
       s.outputPixelFormat = kCVPixelFormatType_OneComponent8
       segReq = s
       reqs.append(s)
@@ -129,7 +129,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     let bpr = CVPixelBufferGetBytesPerRow(mask)
     let ptr = base.assumingMemoryBound(to: UInt8.self)
     let thr: UInt8 = 128
-    let rows = min(56, h)
+    let rows = min(96, h) // 행 샘플 ↑ → 외곽 디테일 ↑
     var left: [[Double]] = []
     var right: [[Double]] = []
     for i in 0..<rows {
@@ -139,7 +139,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       var x = 0
       while x < w {
         if rowPtr[x] >= thr { if minX < 0 { minX = x }; maxX = x }
-        x += 2
+        x += 1
       }
       if minX >= 0 {
         let ny = Double(y) / Double(h - 1)

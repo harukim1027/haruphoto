@@ -83,7 +83,7 @@ public class FaceVisionModule: Module {
     let bpr = CVPixelBufferGetBytesPerRow(mask)
     let ptr = base.assumingMemoryBound(to: UInt8.self)
     let thr: UInt8 = 128
-    let rows = min(56, h) // 샘플 행 수
+    let rows = min(96, h) // 샘플 행 수(디테일)
     var left: [[Double]] = []
     var right: [[Double]] = []
     for i in 0..<rows {
@@ -93,7 +93,7 @@ public class FaceVisionModule: Module {
       var x = 0
       while x < w {
         if rowPtr[x] >= thr { if minX < 0 { minX = x }; maxX = x }
-        x += 2 // 가로 2px 스텝(비용 절감)
+        x += 1
       }
       if minX >= 0 {
         let ny = Double(y) / Double(h - 1)
