@@ -52,6 +52,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       r["poseObs"] = poseObs
       r["poseRaw"] = poseRaw
       r["poseOri"] = poseOri
+      r["frameOri"] = Int(frame.orientation.rawValue) // 진단: 프레임 방향 확정
       if let pose = pose { r["pose"] = pose }
       if let b = bodyOutline { r["bodyOutline"] = b }
       return r

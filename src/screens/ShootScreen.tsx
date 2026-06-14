@@ -357,6 +357,7 @@ export default function ShootScreen() {
           'poseObs=', raw?.poseObs,
           'poseRaw=', raw?.poseRaw,
           'poseOri=', raw?.poseOri,
+          'frameOri=', raw?.frameOri,
           'silhouette=', sN,
           'frame=', frame.width, 'x', frame.height,
         );
@@ -381,6 +382,12 @@ export default function ShootScreen() {
           report(ZERO, '사람이 보이지 않아요', false, null);
         }
         return;
+      }
+
+      // 라이브 세그 마스크는 raw 버퍼 방향 → 얼굴 좌표계와 y 반전. 보정(라이브만).
+      if (lf.bodyOutline) {
+        const fb = lf.bodyOutline;
+        for (let i = 0; i < fb.length; i++) fb[i] = { x: fb[i].x, y: 1 - fb[i].y };
       }
 
       const s0 = matchFace(referenceFeatures, lf);

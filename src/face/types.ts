@@ -48,6 +48,7 @@ export interface FaceVisionResult {
   poseObs?: number; // 진단: 포즈 관찰 수
   poseRaw?: number; // 진단: 신뢰도 무관 인식 관절 수
   poseOri?: string; // 진단: 포즈 검출에 성공한 방향(up/right/... 또는 none)
+  frameOri?: number; // 진단: 프레임 orientation rawValue
 }
 
 // 매칭/표시에 쓰는 정리된 특징
