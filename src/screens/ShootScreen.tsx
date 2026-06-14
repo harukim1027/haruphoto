@@ -44,9 +44,34 @@ type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 
-// 후면 전용 줌 프리셋(전면은 풀FOV 고정 → 배율 의미 없음, UI 숨김).
+// 후면 줌 프리셋(실제 렌즈 기반).
 const ZOOM_PRESETS = [0.5, 0.6, 0.8, 1, 1.5, 2];
+// 전면: 73.7° 풀FOV 가 기본 카메라 "0.5x". 라벨 → zoom 배수(neutralZoom 기준) 매핑.
+//   0.5x = 풀FOV(1×), 1x = 2× 크롭, 2x = 4× 크롭. (기본 카메라 동일 체계)
+const FRONT_ZOOM_MAP: { label: number; mul: number }[] = [
+  { label: 0.5, mul: 1 },
+  { label: 1, mul: 2 },
+  { label: 2, mul: 4 },
+];
 const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
+// 전면 라벨 → 실제 zoom (min~max clamp)
+function frontZoom(label: number, dev: CameraDevice): number {
+  const m = FRONT_ZOOM_MAP.find((e) => e.label === label)?.mul ?? 1;
+  return clamp(dev.neutralZoom * m, dev.minZoom, dev.maxZoom);
+}
+// 현재 zoom 에 가장 가까운 전면 라벨(하이라이트용)
+function frontActiveLabel(z: number, dev: CameraDevice): number {
+  let best = FRONT_ZOOM_MAP[0];
+  let bestD = Infinity;
+  for (const e of FRONT_ZOOM_MAP) {
+    const d = Math.abs(frontZoom(e.label, dev) - z);
+    if (d < bestD) {
+      bestD = d;
+      best = e;
+    }
+  }
+  return best.label;
+}
 function displayToZoom(d: number, dev: CameraDevice): number {
   const z =
     d >= 1
@@ -221,8 +246,7 @@ export default function ShootScreen() {
       startZoom.current = zoom;
     })
     .onUpdate((e) => {
-      // 전면은 풀FOV 고정 → 줌(디지털 크롭) 비활성화
-      if (device && !front)
+      if (device)
         setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
     });
 
@@ -535,12 +559,23 @@ export default function ShootScreen() {
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
-      {/* 전면: 풀FOV 고정(배율 의미 없음) → '와이드' 한 칸만. 후면: 실제 렌즈 프리셋. */}
+      {/* 전면: 풀FOV(0.5x)~크롭(1x/2x) 디지털 줌(기본 카메라 동일 라벨). 후면: 실제 렌즈. */}
       {front ? (
         <View style={styles.zoomRow}>
-          <View style={[styles.zoomBtn, styles.zoomBtnOn]}>
-            <Text style={styles.zoomTextOn}>와이드</Text>
-          </View>
+          {FRONT_ZOOM_MAP.map(({ label }) => {
+            const active = frontActiveLabel(zoom, device) === label;
+            return (
+              <Pressable
+                key={label}
+                style={[styles.zoomBtn, active && styles.zoomBtnOn]}
+                onPress={() => setZoom(frontZoom(label, device))}
+              >
+                <Text style={[styles.zoomText, active && styles.zoomTextOn]}>
+                  {active ? `${label}×` : `${label}`}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
       ) : (
         presets.length > 1 && (
