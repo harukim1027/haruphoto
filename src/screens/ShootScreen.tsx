@@ -44,21 +44,33 @@ type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 
-const ZOOM_PRESETS = [0.5, 0.6, 0.8, 0.9, 1, 1.5, 2];
+const ZOOM_PRESETS = [0.5, 0.6, 0.8, 1, 1.5, 2];
 const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
-function displayToZoom(d: number, dev: CameraDevice): number {
+// 전면: 풀FOV 포맷의 neutralZoom 이 표시상 0.5x. 그 위로 디지털 크롭.
+//   표시 d → zoom = neutral * (d / 0.5).  (0.5→neutral, 1→2×neutral …)
+const FRONT_WIDE = 0.5;
+function displayToZoom(d: number, dev: CameraDevice, front: boolean): number {
+  if (front) {
+    return clamp((dev.neutralZoom * d) / FRONT_WIDE, dev.minZoom, dev.maxZoom);
+  }
   const z =
     d >= 1
       ? dev.neutralZoom * d
       : dev.minZoom + ((d - 0.5) / 0.5) * (dev.neutralZoom - dev.minZoom);
   return clamp(z, dev.minZoom, dev.maxZoom);
 }
-function zoomToDisplay(z: number, dev: CameraDevice): number {
+function zoomToDisplay(z: number, dev: CameraDevice, front: boolean): number {
+  if (front) return (z / dev.neutralZoom) * FRONT_WIDE;
   if (z >= dev.neutralZoom) return z / dev.neutralZoom;
   if (dev.neutralZoom <= dev.minZoom + 1e-3) return 1;
   return 0.5 + ((z - dev.minZoom) / (dev.neutralZoom - dev.minZoom)) * 0.5;
 }
-function presetAvailable(d: number, dev: CameraDevice): boolean {
+function presetAvailable(d: number, dev: CameraDevice, front: boolean): boolean {
+  if (front) {
+    // 풀FOV(0.5x)에서 디지털 크롭 → 0.5 이상이면 maxZoom 한도 내 가능.
+    const z = (dev.neutralZoom * d) / FRONT_WIDE;
+    return z >= dev.minZoom * 0.98 && z <= dev.maxZoom * 1.02;
+  }
   if (d < 1) return dev.minZoom < dev.neutralZoom * 0.97;
   if (d > 1) return dev.neutralZoom * d <= dev.maxZoom * 1.02;
   return true;
@@ -124,6 +136,24 @@ export default function ShootScreen() {
     }
     return best;
   }, [device, position]);
+
+  // 진단 #1: 전면 모든 포맷의 화각/해상도 + 선택/기본 비교
+  useEffect(() => {
+    if (!device || position !== 'front') return;
+    const fmts = device.formats
+      .map((f) => ({ w: f.videoWidth, h: f.videoHeight, fov: f.fieldOfView }))
+      .sort((a, b) => b.fov - a.fov);
+    const fovs = fmts.map((f) => f.fov);
+    console.log(
+      `[front-formats] count=${fmts.length} fovMax=${Math.max(...fovs).toFixed(1)} fovMin=${Math.min(...fovs).toFixed(1)}`,
+    );
+    for (const f of fmts.slice(0, 14)) {
+      console.log(`  FOV=${f.fov.toFixed(1)}°  ${f.w}x${f.h}`);
+    }
+    console.log(
+      `[front-selected] FOV=${format?.fieldOfView?.toFixed(1)} ${format?.videoWidth}x${format?.videoHeight}`,
+    );
+  }, [device, position, format]);
 
   const refImg = referenceFeatures.imageSize ?? { w: 3, h: 4 };
   // 레퍼런스 실루엣을 실제 구도대로 화면(cover)에 매핑(캐싱). 고정 사각형 X.
@@ -344,8 +374,8 @@ export default function ShootScreen() {
     );
   }
 
-  const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device));
-  const activeMul = zoomToDisplay(zoom, device);
+  const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device, front));
+  const activeMul = zoomToDisplay(zoom, device, front);
 
   // 실제 구도대로 화면에 매핑된 실루엣(스무딩 + 곡선 path).
   const toPx = (u: Pt[] | null) =>
@@ -499,7 +529,7 @@ export default function ShootScreen() {
               <Pressable
                 key={m}
                 style={[styles.zoomBtn, active && styles.zoomBtnOn]}
-                onPress={() => setZoom(displayToZoom(m, device))}
+                onPress={() => setZoom(displayToZoom(m, device, front))}
               >
                 <Text style={[styles.zoomText, active && styles.zoomTextOn]}>
                   {active ? `${m}×` : `${m}`}
