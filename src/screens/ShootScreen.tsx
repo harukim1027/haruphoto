@@ -118,6 +118,11 @@ export default function ShootScreen() {
   // → 전면은 device.formats 중 fieldOfView 최대 포맷을 골라 가장 넓게.
   const format = useMemo(() => {
     if (!device || position !== 'front') return undefined;
+    // 화각(FOV) 최대. 동률(전면은 보통 전부 동일)이면 '영상에 적당한 해상도'를
+    // 선호 — 풀센서 12MP(예: 4032x3024)를 매 프레임 세그멘테이션에 넘기면 과부하라
+    // videoHeight ≤ 1600(≈1440p) 중 가장 큰 것을 고른다(화각은 동일 유지).
+    const resScore = (f: (typeof device.formats)[number]) =>
+      f.videoHeight <= 1600 ? f.videoHeight : 1600 - f.videoHeight;
     let best: (typeof device.formats)[number] | undefined;
     for (const f of device.formats) {
       if (f.videoHeight < 480) continue; // 썸네일급 제외
@@ -125,13 +130,8 @@ export default function ShootScreen() {
         best = f;
         continue;
       }
-      // 화각 최대, 동률이면 해상도 높은 것
       const df = f.fieldOfView - best.fieldOfView;
-      if (
-        df > 0.5 ||
-        (Math.abs(df) <= 0.5 &&
-          f.videoWidth * f.videoHeight > best.videoWidth * best.videoHeight)
-      ) {
+      if (df > 0.5 || (Math.abs(df) <= 0.5 && resScore(f) > resScore(best))) {
         best = f;
       }
     }
