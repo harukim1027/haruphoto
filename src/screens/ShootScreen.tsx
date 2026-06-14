@@ -145,14 +145,25 @@ export default function ShootScreen() {
       .map((f) => ({ w: f.videoWidth, h: f.videoHeight, fov: f.fieldOfView }))
       .sort((a, b) => b.fov - a.fov);
     const fovs = fmts.map((f) => f.fov);
+    const fovMax = Math.max(...fovs);
+    const fovMin = Math.min(...fovs);
+    const spread = fovMax - fovMin;
     console.log(
-      `[front-formats] count=${fmts.length} fovMax=${Math.max(...fovs).toFixed(1)} fovMin=${Math.min(...fovs).toFixed(1)}`,
+      `[front-formats] count=${fmts.length} fovMax=${fovMax.toFixed(1)} fovMin=${fovMin.toFixed(1)} spread=${spread.toFixed(1)}°`,
     );
     for (const f of fmts.slice(0, 14)) {
       console.log(`  FOV=${f.fov.toFixed(1)}°  ${f.w}x${f.h}`);
     }
     console.log(
       `[front-selected] FOV=${format?.fieldOfView?.toFixed(1)} ${format?.videoWidth}x${format?.videoHeight}`,
+    );
+    // 판정 힌트: 포맷 간 화각 차이가 거의 없으면 포맷 고정으로는 못 넓힘(네이티브도 동일 한계).
+    console.log(
+      `[front-verdict] ${
+        spread < 2
+          ? '모든 포맷 화각 거의 동일 → VisionCamera 포맷 고정으로 더 넓힐 수 없음(이 기기 전면은 풀FOV가 이미 최대; 네이티브도 동일)'
+          : `넓은 포맷 존재(최대 ${fovMax.toFixed(0)}°) → 그 포맷 고정 시 넓어짐. 기본보다 넓은지 순정 0.5x와 비교`
+      }`,
     );
   }, [device, position, format]);
 
