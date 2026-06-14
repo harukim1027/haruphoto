@@ -35,8 +35,18 @@ import {
   placeUnit,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
-import Silhouette from '../components/Silhouette';
+import { Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
 import type { RootStackParamList } from '../../App';
+
+// 화면 픽셀 점들 → 닫힌 Skia path.
+function mkClosed(pts: Pt[] | null | undefined) {
+  if (!pts || pts.length < 3) return null;
+  const p = Skia.Path.Make();
+  p.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i].x, pts[i].y);
+  p.close();
+  return p;
+}
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
 type Rt = RouteProp<RootStackParamList, 'Shoot'>;
@@ -316,8 +326,8 @@ export default function ShootScreen() {
         Math.max(live.fw, live.fh),
       )
     : null;
-  const placedRef = placeUnit(refUnitSil, W, H);
-  const placedLive = placeUnit(liveUnitSil, W, H);
+  const refPath = mkClosed(placeUnit(refUnitSil, W, H));
+  const livePath = mkClosed(placeUnit(liveUnitSil, W, H));
   const iouVal = live?.iou ?? 0;
   const iouColor =
     iouVal >= POSE_IOU_GOOD
@@ -343,17 +353,31 @@ export default function ShootScreen() {
         />
       </GestureDetector>
 
-      {/* 레퍼런스 실루엣: 고정 반투명 오버레이("여기 몸을 맞춰라"). IoU 오르면 초록. */}
-      {placedRef && (
-        <Silhouette
-          bodyOutline={placedRef}
-          color={iouColor}
-          fillColor={iouFill}
-          width={4}
-        />
-      )}
-      {/* 내 실시간 실루엣: 초록 외곽선 */}
-      {placedLive && <Silhouette bodyOutline={placedLive} color="#00E08A" width={2} />}
+      {/* 실루엣 오버레이 — 단일 Canvas. 마젠타 마커=Canvas 렌더 확인용. */}
+      <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Circle cx={24} cy={H * 0.4} r={12} color="magenta" />
+        {refPath && iouFill && (
+          <Path path={refPath} style="fill" color={iouFill} />
+        )}
+        {refPath && (
+          <Path
+            path={refPath}
+            style="stroke"
+            color={iouColor}
+            strokeWidth={4}
+            strokeJoin="round"
+          />
+        )}
+        {livePath && (
+          <Path
+            path={livePath}
+            style="stroke"
+            color="#00E08A"
+            strokeWidth={2}
+            strokeJoin="round"
+          />
+        )}
+      </Canvas>
 
       <View pointerEvents="none" style={styles.guideWrap}>
         <Text style={styles.guideText}>{guide}</Text>
