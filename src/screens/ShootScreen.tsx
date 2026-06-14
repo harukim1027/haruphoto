@@ -48,11 +48,12 @@ const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 // 후면 줌 프리셋(실제 렌즈 기반).
 const ZOOM_PRESETS = [0.5, 0.6, 0.8, 1, 1.5, 2];
 // 전면: 73.7° 풀FOV 가 기본 카메라 "0.5x". 라벨 → zoom 배수(neutralZoom 기준) 매핑.
-//   0.5x = 풀FOV(1×), 1x = 2× 크롭, 2x = 4× 크롭. (기본 카메라 동일 체계)
+//   0.5x=풀FOV(유지). 기본 카메라 0.5x:1x 화각비 ≈ 1.4~1.5배라 1x=1.45, 2x=2.9.
+//   실기기 비교 후 미세조정: 1x가 크면 1.45→1.3, 작으면 1.6.
 const FRONT_ZOOM_MAP: { label: number; mul: number }[] = [
-  { label: 0.5, mul: 1 },
-  { label: 1, mul: 2 },
-  { label: 2, mul: 4 },
+  { label: 0.5, mul: 1.0 },
+  { label: 1, mul: 1.45 },
+  { label: 2, mul: 2.9 },
 ];
 const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
 // 전면 라벨 → 실제 zoom (min~max clamp)
