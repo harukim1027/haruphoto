@@ -43,6 +43,13 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       return ["found": false]
     }
     let pose = Self.poseJoints(poseReq.results?.first)
+    // 진단: 포즈 관찰 수 + 신뢰도 무관 인식 관절 수(왜 pose=0 인지 판별).
+    let poseObs = poseReq.results?.count ?? 0
+    var poseRaw = 0
+    if let body = poseReq.results?.first,
+       let pts = try? body.recognizedPoints(.all) {
+      poseRaw = pts.values.filter { $0.confidence > 0 }.count
+    }
     var bodyOutline: [[Double]]?
     if #available(iOS 15.0, *),
        let seg = segReq?.results?.first as? VNPixelBufferObservation {
@@ -50,6 +57,8 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     }
     func finalize(_ base: [String: Any]) -> [String: Any] {
       var r = base
+      r["poseObs"] = poseObs
+      r["poseRaw"] = poseRaw
       if let pose = pose { r["pose"] = pose }
       if let b = bodyOutline { r["bodyOutline"] = b }
       return r
@@ -109,7 +118,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     ]
     var out: [String: Any] = [:]
     for (key, jn) in names {
-      if let p = try? body.recognizedPoint(jn), p.confidence > 0.1 {
+      if let p = try? body.recognizedPoint(jn), p.confidence > 0.05 {
         out[key] = ["x": Double(p.location.x), "y": Double(1.0 - p.location.y),
                     "c": Double(p.confidence)]
       }

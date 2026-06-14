@@ -20,7 +20,13 @@ import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
-import { toFaceFeatures, type FaceVisionResult, type Pt } from '../face/types';
+import {
+  toFaceFeatures,
+  POSE_EDGES,
+  type FaceVisionResult,
+  type PoseJoints,
+  type Pt,
+} from '../face/types';
 import {
   matchFace,
   MATCH_THRESHOLD,
@@ -38,7 +44,37 @@ import {
   SILHOUETTE_SMOOTH_WIN,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
-import Svg, { Polygon, Ellipse, Circle as SvgCircle } from 'react-native-svg';
+import Svg, {
+  Polygon,
+  Ellipse,
+  Line as SvgLine,
+  Circle as SvgCircle,
+} from 'react-native-svg';
+
+// 관절(이미지 정규화) → 화면 픽셀. 미리보기와 동일 매핑(front=contain).
+function poseToScreen(
+  pose: PoseJoints | undefined,
+  imgW: number,
+  imgH: number,
+  W: number,
+  H: number,
+  contain: boolean,
+): Partial<Record<keyof PoseJoints, Pt>> {
+  const out: Partial<Record<keyof PoseJoints, Pt>> = {};
+  if (!pose) return out;
+  const scale = contain
+    ? Math.min(W / imgW, H / imgH)
+    : Math.max(W / imgW, H / imgH);
+  const dW = imgW * scale;
+  const dH = imgH * scale;
+  const offX = (W - dW) / 2;
+  const offY = (H - dH) / 2;
+  for (const k of Object.keys(pose) as (keyof PoseJoints)[]) {
+    const j = pose[k];
+    if (j && j.c > 0.05) out[k] = { x: offX + j.x * dW, y: offY + j.y * dH };
+  }
+  return out;
+}
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -105,6 +141,7 @@ const ZERO: MatchScores = {
 
 interface LiveData {
   bodyOutline?: Pt[]; // un-mirror 보정된 몸 실루엣 (이미지 정규화)
+  pose?: PoseJoints; // un-mirror 보정된 상체 관절
   iou: number; // 레퍼런스 실루엣과의 겹침(주력 매칭)
   cx: number;
   cy: number;
@@ -119,6 +156,8 @@ interface Diag {
   noFace: boolean;
   contourN: number;
   poseN: number;
+  poseObs: number;
+  poseRaw: number;
   silN: number;
   fw: number;
   fh: number;
@@ -308,9 +347,9 @@ export default function ShootScreen() {
         const sN = raw?.bodyOutline?.length ?? 0;
         console.log(
           '[shoot] found=', raw?.found,
-          'noFace=', raw?.noFace,
-          'faceContour=', cN,
           'pose=', pN,
+          'poseObs=', raw?.poseObs,
+          'poseRaw=', raw?.poseRaw,
           'silhouette=', sN,
           'frame=', frame.width, 'x', frame.height,
         );
@@ -319,6 +358,8 @@ export default function ShootScreen() {
           noFace: !!raw?.noFace,
           contourN: cN,
           poseN: pN,
+          poseObs: raw?.poseObs ?? 0,
+          poseRaw: raw?.poseRaw ?? 0,
           silN: sN,
           fw: frame.width,
           fh: frame.height,
@@ -386,6 +427,7 @@ export default function ShootScreen() {
               : '실루엣 안에 몸을 맞춰요';
         report(s, g, true, {
           bodyOutline: lf.bodyOutline,
+          pose: lf.pose,
           iou,
           cx: lf.framing.cx,
           cy: lf.framing.cy,
@@ -441,6 +483,11 @@ export default function ShootScreen() {
   const livePoly = svgPolyPoints(
     smoothEdges(toPx(liveScreenUnit), SILHOUETTE_SMOOTH_WIN),
   );
+  // 포즈 스켈레톤(자세 매칭 주). 목표=레퍼런스, 라이브=내 관절.
+  const refSkel = poseToScreen(referenceFeatures.pose, refImg.w, refImg.h, W, H, front);
+  const liveSkel = live
+    ? poseToScreen(live.pose, Math.min(live.fw, live.fh), Math.max(live.fw, live.fh), W, H, front)
+    : {};
   // 내 얼굴 위치(프레이밍 중심) → 화면 점. 레퍼런스 얼굴 타원과 맞추도록 유도.
   const liveFacePt =
     live && hasFace
@@ -516,6 +563,52 @@ export default function ShootScreen() {
             strokeLinejoin="round"
           />
         )}
+        {/* 목표 스켈레톤(흰, 반투명) — 자세 가이드 */}
+        {POSE_EDGES.map(([a, b], i) => {
+          const pa = refSkel[a];
+          const pb = refSkel[b];
+          return pa && pb ? (
+            <SvgLine
+              key={`re${i}`}
+              x1={pa.x}
+              y1={pa.y}
+              x2={pb.x}
+              y2={pb.y}
+              stroke="rgba(255,255,255,0.8)"
+              strokeWidth={5}
+              strokeLinecap="round"
+            />
+          ) : null;
+        })}
+        {(Object.keys(refSkel) as (keyof PoseJoints)[]).map((k) => {
+          const p = refSkel[k];
+          return p ? (
+            <SvgCircle key={`rj${k}`} cx={p.x} cy={p.y} r={6} fill="#fff" />
+          ) : null;
+        })}
+        {/* 내 실시간 스켈레톤(초록) */}
+        {POSE_EDGES.map(([a, b], i) => {
+          const pa = liveSkel[a];
+          const pb = liveSkel[b];
+          return pa && pb ? (
+            <SvgLine
+              key={`le${i}`}
+              x1={pa.x}
+              y1={pa.y}
+              x2={pb.x}
+              y2={pb.y}
+              stroke="#00E08A"
+              strokeWidth={3.5}
+              strokeLinecap="round"
+            />
+          ) : null;
+        })}
+        {(Object.keys(liveSkel) as (keyof PoseJoints)[]).map((k) => {
+          const p = liveSkel[k];
+          return p ? (
+            <SvgCircle key={`lj${k}`} cx={p.x} cy={p.y} r={5} fill="#00E08A" />
+          ) : null;
+        })}
         {/* 얼굴 위치 가이드(목표 타원) */}
         {faceGuide && (
           <Ellipse
@@ -556,9 +649,11 @@ export default function ShootScreen() {
             {'\n'}lenses=[{device.physicalDevices.join(',')}] FOV=
             {format ? `${format.fieldOfView.toFixed(0)}° ${format.videoWidth}x${format.videoHeight}` : 'default'}
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
-            {'\n'}FACE found={diag?.found ? 'Y' : 'N'} 실루엣={diag?.silN ?? 0} refSil=
-            {hasRefSil ? refScreenUnit!.length : 0} IoU={Math.round(iouVal * 100)}{' '}
-            frame={diag ? `${diag.fw}x${diag.fh}` : '-'}
+            {'\n'}FACE found={diag?.found ? 'Y' : 'N'} 실루엣={diag?.silN ?? 0} IoU=
+            {Math.round(iouVal * 100)}
+            {'\n'}POSE 관절={diag?.poseN ?? 0} obs={diag?.poseObs ?? 0} raw=
+            {diag?.poseRaw ?? 0} refPose={referenceFeatures.pose ? 'Y' : 'N'} frame=
+            {diag ? `${diag.fw}x${diag.fh}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>
         </Pressable>

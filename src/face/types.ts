@@ -45,6 +45,8 @@ export interface FaceVisionResult {
   faceContour?: number[][]; // 얼굴 외곽 [x,y] (top-left 정규화)
   bodyOutline?: number[][]; // 몸 실루엣 외곽 폴리곤 [x,y] (top-left 정규화)
   pose?: PoseJoints; // 상체 관절 (top-left 정규화)
+  poseObs?: number; // 진단: 포즈 관찰 수
+  poseRaw?: number; // 진단: 신뢰도 무관 인식 관절 수
 }
 
 // 매칭/표시에 쓰는 정리된 특징

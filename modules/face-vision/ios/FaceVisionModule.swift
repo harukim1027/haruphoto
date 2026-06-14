@@ -119,7 +119,7 @@ public class FaceVisionModule: Module {
     ]
     var out: [String: Any] = [:]
     for (key, jn) in names {
-      if let p = try? body.recognizedPoint(jn), p.confidence > 0.1 {
+      if let p = try? body.recognizedPoint(jn), p.confidence > 0.05 {
         out[key] = ["x": Double(p.location.x), "y": Double(1.0 - p.location.y),
                     "c": Double(p.confidence)]
       }
