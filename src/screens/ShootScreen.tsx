@@ -44,33 +44,22 @@ type Rt = RouteProp<RootStackParamList, 'Shoot'>;
 
 const facePlugin = VisionCameraProxy.initFrameProcessorPlugin('detectFace', {});
 
+// 후면 전용 줌 프리셋(전면은 풀FOV 고정 → 배율 의미 없음, UI 숨김).
 const ZOOM_PRESETS = [0.5, 0.6, 0.8, 1, 1.5, 2];
 const clamp = (z: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, z));
-// 전면: 풀FOV 포맷의 neutralZoom 이 표시상 0.5x. 그 위로 디지털 크롭.
-//   표시 d → zoom = neutral * (d / 0.5).  (0.5→neutral, 1→2×neutral …)
-const FRONT_WIDE = 0.5;
-function displayToZoom(d: number, dev: CameraDevice, front: boolean): number {
-  if (front) {
-    return clamp((dev.neutralZoom * d) / FRONT_WIDE, dev.minZoom, dev.maxZoom);
-  }
+function displayToZoom(d: number, dev: CameraDevice): number {
   const z =
     d >= 1
       ? dev.neutralZoom * d
       : dev.minZoom + ((d - 0.5) / 0.5) * (dev.neutralZoom - dev.minZoom);
   return clamp(z, dev.minZoom, dev.maxZoom);
 }
-function zoomToDisplay(z: number, dev: CameraDevice, front: boolean): number {
-  if (front) return (z / dev.neutralZoom) * FRONT_WIDE;
+function zoomToDisplay(z: number, dev: CameraDevice): number {
   if (z >= dev.neutralZoom) return z / dev.neutralZoom;
   if (dev.neutralZoom <= dev.minZoom + 1e-3) return 1;
   return 0.5 + ((z - dev.minZoom) / (dev.neutralZoom - dev.minZoom)) * 0.5;
 }
-function presetAvailable(d: number, dev: CameraDevice, front: boolean): boolean {
-  if (front) {
-    // 풀FOV(0.5x)에서 디지털 크롭 → 0.5 이상이면 maxZoom 한도 내 가능.
-    const z = (dev.neutralZoom * d) / FRONT_WIDE;
-    return z >= dev.minZoom * 0.98 && z <= dev.maxZoom * 1.02;
-  }
+function presetAvailable(d: number, dev: CameraDevice): boolean {
   if (d < 1) return dev.minZoom < dev.neutralZoom * 0.97;
   if (d > 1) return dev.neutralZoom * d <= dev.maxZoom * 1.02;
   return true;
@@ -131,8 +120,20 @@ export default function ShootScreen() {
     if (!device || position !== 'front') return undefined;
     let best: (typeof device.formats)[number] | undefined;
     for (const f of device.formats) {
-      if (f.videoHeight < 720) continue; // 너무 저해상 제외
-      if (!best || f.fieldOfView > best.fieldOfView) best = f;
+      if (f.videoHeight < 480) continue; // 썸네일급 제외
+      if (!best) {
+        best = f;
+        continue;
+      }
+      // 화각 최대, 동률이면 해상도 높은 것
+      const df = f.fieldOfView - best.fieldOfView;
+      if (
+        df > 0.5 ||
+        (Math.abs(df) <= 0.5 &&
+          f.videoWidth * f.videoHeight > best.videoWidth * best.videoHeight)
+      ) {
+        best = f;
+      }
     }
     return best;
   }, [device, position]);
@@ -209,7 +210,9 @@ export default function ShootScreen() {
       startZoom.current = zoom;
     })
     .onUpdate((e) => {
-      if (device) setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
+      // 전면은 풀FOV 고정 → 줌(디지털 크롭) 비활성화
+      if (device && !front)
+        setZoom(clamp(startZoom.current * e.scale, device.minZoom, device.maxZoom));
     });
 
   const highSince = useSharedValue(0);
@@ -374,8 +377,8 @@ export default function ShootScreen() {
     );
   }
 
-  const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device, front));
-  const activeMul = zoomToDisplay(zoom, device, front);
+  const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device));
+  const activeMul = zoomToDisplay(zoom, device);
 
   // 실제 구도대로 화면에 매핑된 실루엣(스무딩 + 곡선 path).
   const toPx = (u: Pt[] | null) =>
@@ -521,23 +524,32 @@ export default function ShootScreen() {
         <Text style={styles.overall}>종합 {Math.round(scores.overall * 100)}%</Text>
       </View>
 
-      {presets.length > 1 && (
+      {/* 전면: 풀FOV 고정(배율 의미 없음) → '와이드' 한 칸만. 후면: 실제 렌즈 프리셋. */}
+      {front ? (
         <View style={styles.zoomRow}>
-          {presets.map((m) => {
-            const active = Math.abs(activeMul - m) < 0.06;
-            return (
-              <Pressable
-                key={m}
-                style={[styles.zoomBtn, active && styles.zoomBtnOn]}
-                onPress={() => setZoom(displayToZoom(m, device, front))}
-              >
-                <Text style={[styles.zoomText, active && styles.zoomTextOn]}>
-                  {active ? `${m}×` : `${m}`}
-                </Text>
-              </Pressable>
-            );
-          })}
+          <View style={[styles.zoomBtn, styles.zoomBtnOn]}>
+            <Text style={styles.zoomTextOn}>와이드</Text>
+          </View>
         </View>
+      ) : (
+        presets.length > 1 && (
+          <View style={styles.zoomRow}>
+            {presets.map((m) => {
+              const active = Math.abs(activeMul - m) < 0.06;
+              return (
+                <Pressable
+                  key={m}
+                  style={[styles.zoomBtn, active && styles.zoomBtnOn]}
+                  onPress={() => setZoom(displayToZoom(m, device))}
+                >
+                  <Text style={[styles.zoomText, active && styles.zoomTextOn]}>
+                    {active ? `${m}×` : `${m}`}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        )
       )}
 
       <Pressable
