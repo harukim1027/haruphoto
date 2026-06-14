@@ -158,6 +158,7 @@ interface Diag {
   poseN: number;
   poseObs: number;
   poseRaw: number;
+  poseOri: string;
   silN: number;
   fw: number;
   fh: number;
@@ -350,6 +351,7 @@ export default function ShootScreen() {
           'pose=', pN,
           'poseObs=', raw?.poseObs,
           'poseRaw=', raw?.poseRaw,
+          'poseOri=', raw?.poseOri,
           'silhouette=', sN,
           'frame=', frame.width, 'x', frame.height,
         );
@@ -360,6 +362,7 @@ export default function ShootScreen() {
           poseN: pN,
           poseObs: raw?.poseObs ?? 0,
           poseRaw: raw?.poseRaw ?? 0,
+          poseOri: raw?.poseOri ?? 'none',
           silN: sN,
           fw: frame.width,
           fh: frame.height,
@@ -652,8 +655,8 @@ export default function ShootScreen() {
             {'\n'}FACE found={diag?.found ? 'Y' : 'N'} 실루엣={diag?.silN ?? 0} IoU=
             {Math.round(iouVal * 100)}
             {'\n'}POSE 관절={diag?.poseN ?? 0} obs={diag?.poseObs ?? 0} raw=
-            {diag?.poseRaw ?? 0} refPose={referenceFeatures.pose ? 'Y' : 'N'} frame=
-            {diag ? `${diag.fw}x${diag.fh}` : '-'}
+            {diag?.poseRaw ?? 0} ori={diag?.poseOri ?? '-'} refPose=
+            {referenceFeatures.pose ? 'Y' : 'N'}
             {'\n'}(탭하면 숨김)
           </Text>
         </Pressable>

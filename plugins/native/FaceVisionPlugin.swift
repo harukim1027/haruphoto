@@ -25,9 +25,9 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     }
 
     let orientation = cgOrientation(from: frame.orientation)
+    // Face + Segmentation (방향에 둔감 — 현재 orientation 으로 동작 확인됨)
     let faceReq = VNDetectFaceLandmarksRequest()
-    let poseReq = VNDetectHumanBodyPoseRequest()
-    var reqs: [VNRequest] = [faceReq, poseReq]
+    var reqs: [VNRequest] = [faceReq]
     var segReq: VNGeneratePersonSegmentationRequest?
     if #available(iOS 15.0, *) {
       let s = VNGeneratePersonSegmentationRequest()
@@ -37,19 +37,11 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       reqs.append(s)
     }
     let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
-    do {
-      try handler.perform(reqs)
-    } catch {
-      return ["found": false]
-    }
-    let pose = Self.poseJoints(poseReq.results?.first)
-    // 진단: 포즈 관찰 수 + 신뢰도 무관 인식 관절 수(왜 pose=0 인지 판별).
-    let poseObs = poseReq.results?.count ?? 0
-    var poseRaw = 0
-    if let body = poseReq.results?.first,
-       let pts = try? body.recognizedPoints(.all) {
-      poseRaw = pts.values.filter { $0.confidence > 0 }.count
-    }
+    try? handler.perform(reqs)
+
+    // Pose: 방향 민감 → 별도 핸들러. 캐시된 방향 우선, 0이면 1초마다 8방향 스윕(자동보정).
+    let (pose, poseObs, poseRaw, poseOri) = Self.detectPose(pixelBuffer, primary: orientation)
+
     var bodyOutline: [[Double]]?
     if #available(iOS 15.0, *),
        let seg = segReq?.results?.first as? VNPixelBufferObservation {
@@ -59,6 +51,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       var r = base
       r["poseObs"] = poseObs
       r["poseRaw"] = poseRaw
+      r["poseOri"] = poseOri
       if let pose = pose { r["pose"] = pose }
       if let b = bodyOutline { r["bodyOutline"] = b }
       return r
@@ -70,6 +63,53 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       return ["found": false]
     }
     return finalize(Self.features(from: face, mirrored: frame.isMirrored))
+  }
+
+  // 포즈 검출 방향 캐시(성공한 방향 재사용) + 스윕 throttle.
+  static var poseBestOri: CGImagePropertyOrientation?
+  static var poseLastSweep: Double = 0
+
+  /// 상체 포즈 검출. 캐시된 방향 우선, 실패 시 1초마다 8방향 스윕(진단+자동보정).
+  /// 반환: (관절, 관찰수, raw관절수, 사용방향명)
+  static func detectPose(_ pb: CVPixelBuffer, primary: CGImagePropertyOrientation)
+    -> ([String: Any]?, Int, Int, String) {
+    func run(_ ori: CGImagePropertyOrientation) -> VNHumanBodyPoseObservation? {
+      let req = VNDetectHumanBodyPoseRequest()
+      let h = VNImageRequestHandler(cvPixelBuffer: pb, orientation: ori, options: [:])
+      try? h.perform([req])
+      return req.results?.first
+    }
+    let useOri = poseBestOri ?? primary
+    var obs = run(useOri)
+    var usedOri = useOri
+    if obs == nil {
+      let now = Date().timeIntervalSince1970
+      if now - poseLastSweep > 1.0 {
+        poseLastSweep = now
+        let all: [CGImagePropertyOrientation] = [
+          .up, .right, .left, .down, .upMirrored, .rightMirrored, .leftMirrored, .downMirrored,
+        ]
+        for ori in all where ori != useOri {
+          if let o = run(ori) { obs = o; usedOri = ori; poseBestOri = ori; break }
+        }
+      }
+    }
+    guard let body = obs else { return (nil, 0, 0, "none") }
+    var raw = 0
+    if let pts = try? body.recognizedPoints(.all) {
+      raw = pts.values.filter { $0.confidence > 0 }.count
+    }
+    return (poseJoints(body), 1, raw, oriName(usedOri))
+  }
+
+  static func oriName(_ o: CGImagePropertyOrientation) -> String {
+    switch o {
+    case .up: return "up"; case .down: return "down"
+    case .left: return "left"; case .right: return "right"
+    case .upMirrored: return "upM"; case .downMirrored: return "downM"
+    case .leftMirrored: return "leftM"; case .rightMirrored: return "rightM"
+    @unknown default: return "?"
+    }
   }
 
   /// 인물 분할 마스크 → 몸 실루엣 외곽 폴리곤 (top-left 정규화, 닫힌 형태).
