@@ -19,6 +19,8 @@ import {
   type Pt,
 } from '../face/types';
 import Silhouette from '../components/Silhouette';
+import { summarizePose } from '../face/poseCompare';
+import { summarizeFace } from '../face/faceAngle';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'ReferencePick'>;
@@ -143,9 +145,19 @@ export default function ReferencePickScreen() {
       </Pressable>
 
       {features && !error && (
-        <Text style={styles.ok}>
-          ✓ 얼굴 인식{hasPose ? ' · 상체 자세 인식' : ' (상체가 더 보이면 자세도 잡혀요)'}
-        </Text>
+        <>
+          <Text style={styles.ok}>
+            ✓ 얼굴 인식{hasPose ? ' · 상체 자세 인식' : ' (상체가 더 보이면 자세도 잡혀요)'}
+          </Text>
+          {hasPose && summarizePose(features.pose) && (
+            <Text style={styles.poseSummary}>자세: {summarizePose(features.pose)}</Text>
+          )}
+          {features.hasFace && (
+            <Text style={styles.poseSummary}>
+              고개: {summarizeFace(features.orientation)}
+            </Text>
+          )}
+        </>
       )}
       {error && <Text style={styles.error}>{error}</Text>}
 
@@ -210,6 +222,7 @@ const styles = StyleSheet.create({
   },
   busyText: { color: '#FFF', fontSize: 13 },
   ok: { color: '#00E08A', fontSize: 13, marginTop: 12 },
+  poseSummary: { color: '#22D3EE', fontSize: 13, marginTop: 6, fontWeight: '600' },
   error: { color: '#FF6B6B', fontSize: 13, marginTop: 12 },
   actions: { flexDirection: 'row', gap: 10, marginTop: 'auto', marginBottom: 24 },
   primary: {

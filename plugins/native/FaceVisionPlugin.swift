@@ -66,11 +66,18 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     return finalize(Self.features(from: face, mirrored: frame.isMirrored))
   }
 
-  // 포즈 검출 방향 캐시(성공한 방향 재사용) + 스윕 throttle.
-  static var poseBestOri: CGImagePropertyOrientation?
-  static var poseLastSweep: Double = 0
+  // 포즈 검출 방향: 캘리브레이션 투표 → 하드 락. 락 후 재스윕 안 함(좌표계 안정).
+  static var poseLockedOri: CGImagePropertyOrientation? // 확정된 방향(락)
+  static var poseVotes: [Int: Int] = [:]                // 캘리브레이션 투표(ori.rawValue→표수)
+  static var poseMissStreak: Int = 0                    // 연속 미검출(락 해제 판단)
+  static var poseLastSweep: Double = 0                  // 스윕 throttle
 
-  /// 상체 포즈 검출. 캐시된 방향 우선, 실패 시 1초마다 8방향 스윕(진단+자동보정).
+  /// 상체 포즈 검출.
+  /// - 락된 방향이 있으면 그 방향만 사용(좌표계 고정). 한두 프레임 놓쳐도 즉시 락 해제 안 함
+  ///   (JS가 last-good pose 를 hold). 지속 손실(streak)일 때만 재캘리브레이션.
+  /// - 미락 상태: 0.25초마다 8방향 스윕 → "직립도(어깨>골반, 목>어깨) 우선, 그다음 관절수"로
+  ///   최적 방향 선택 → 투표 누적 → 충분히 모이면 최빈 방향을 하드 락.
+  ///   (관절수만 보면 회전된 방향도 비슷해 thrash → 직립도가 진짜 방향을 가른다.)
   /// 반환: (관절, 관찰수, raw관절수, 사용방향명)
   static func detectPose(_ pb: CVPixelBuffer, primary: CGImagePropertyOrientation)
     -> ([String: Any]?, Int, Int, String) {
@@ -83,31 +90,60 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     func rawCount(_ o: VNHumanBodyPoseObservation) -> Int {
       (try? o.recognizedPoints(.all))?.values.filter { $0.confidence > 0 }.count ?? 0
     }
-    // 캐시된 방향 우선(좌표계 안정). 그 방향이 잡히면 그대로 사용.
-    let useOri = poseBestOri ?? primary
-    var obs = run(useOri)
-    var usedOri = useOri
-    // 캐시 실패 시 1초마다 8방향 스윕 → 관절 가장 많은 방향 채택(우연 검출 배제).
-    if obs == nil {
-      let now = Date().timeIntervalSince1970
-      if now - poseLastSweep > 1.0 {
-        poseLastSweep = now
-        let all: [CGImagePropertyOrientation] = [
-          .up, .right, .left, .down, .upMirrored, .rightMirrored, .leftMirrored, .downMirrored,
-        ]
-        var bestRaw = -1
-        for ori in all {
-          if let o = run(ori) {
-            let r = rawCount(o)
-            if r > bestRaw { bestRaw = r; obs = o; usedOri = ori }
-          }
-        }
-        // 충분히 강한 검출만 채택·캐시(약한 우연 방향 거부 → 안정화).
-        if bestRaw >= 6 { poseBestOri = usedOri } else { obs = nil }
+    // Vision 좌표(원점 좌하단, y 위로 증가). 직립이면 어깨 y > 골반 y, 목 y > 어깨 y.
+    func jointY(_ o: VNHumanBodyPoseObservation, _ jn: VNHumanBodyPoseObservation.JointName) -> Double? {
+      if let p = try? o.recognizedPoint(jn), p.confidence > 0.1 { return Double(p.location.y) }
+      return nil
+    }
+    func uprightOK(_ o: VNHumanBodyPoseObservation) -> Bool {
+      let lS = jointY(o, .leftShoulder), rS = jointY(o, .rightShoulder)
+      let shMid: Double? = (lS != nil && rS != nil) ? (lS! + rS!) / 2 : (lS ?? rS)
+      if let sh = shMid, let rt = jointY(o, .root) { return sh > rt }       // 어깨가 골반 위
+      if let nk = jointY(o, .neck), let sh = shMid { return nk >= sh - 0.03 } // 목이 어깨 위/근처
+      return false // 토르소 단서 없으면 직립 보너스 없음(관절수로만 경쟁)
+    }
+    // 점수: 직립이면 +100(회전 방향 배제), 그 위에 관절수.
+    func quality(_ o: VNHumanBodyPoseObservation) -> Int {
+      rawCount(o) + (uprightOK(o) ? 100 : 0)
+    }
+
+    // 1) 락된 방향 우선 — 좌표계 고정. 놓쳐도 잠깐은 nil(JS hold)로 메움.
+    if let lock = poseLockedOri {
+      if let o = run(lock), rawCount(o) >= 4 {
+        poseMissStreak = 0
+        return (poseJoints(o), 1, rawCount(o), oriName(lock))
+      }
+      poseMissStreak += 1
+      if poseMissStreak < 20 { return (nil, 0, 0, "lock?") } // 지속 손실 전엔 락 유지
+      // 지속 손실 → 락 해제 후 재캘리브레이션
+      poseLockedOri = nil; poseVotes = [:]; poseMissStreak = 0
+    }
+
+    // 2) 미락(캘리브레이션): throttle 두고 스윕 → 직립도 우선 최적 방향 선택.
+    let now = Date().timeIntervalSince1970
+    if now - poseLastSweep < 0.25 { return (nil, 0, 0, "calib") }
+    poseLastSweep = now
+    let all: [CGImagePropertyOrientation] = [
+      .up, .right, .left, .down, .upMirrored, .rightMirrored, .leftMirrored, .downMirrored,
+    ]
+    var best: VNHumanBodyPoseObservation?
+    var bestOri = primary
+    var bestQ = -1
+    for ori in all {
+      if let o = run(ori) {
+        let q = quality(o)
+        if q > bestQ { bestQ = q; best = o; bestOri = ori }
       }
     }
-    guard let body = obs else { return (nil, 0, 0, "none") }
-    return (poseJoints(body), 1, rawCount(body), oriName(usedOri))
+    guard let body = best, rawCount(body) >= 6 else { return (nil, 0, 0, "none") }
+    // 투표 누적 → 4표 이상이면 최빈 방향 하드 락.
+    poseVotes[Int(bestOri.rawValue), default: 0] += 1
+    let total = poseVotes.values.reduce(0, +)
+    if total >= 4, let top = poseVotes.max(by: { $0.value < $1.value })?.key,
+       let ori = CGImagePropertyOrientation(rawValue: UInt32(top)) {
+      poseLockedOri = ori
+    }
+    return (poseJoints(body), 1, rawCount(body), oriName(bestOri))
   }
 
   static func oriName(_ o: CGImagePropertyOrientation) -> String {

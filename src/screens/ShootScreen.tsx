@@ -30,6 +30,16 @@ import {
 import { matchFace, MATCH_THRESHOLD, type MatchScores } from '../face/matchFace';
 import { guideText } from '../face/guide';
 import {
+  comparePose,
+  summarizePose,
+  PART_LABEL,
+  type JMap,
+  type PartKey,
+  type PoseComparison,
+} from '../face/poseCompare';
+import { createLiveSmoother } from '../face/smooth';
+import { compareFace, summarizeFace, type FaceCompare } from '../face/faceAngle';
+import {
   silhouetteIoU,
   coverUnit,
   coverPoint,
@@ -145,6 +155,10 @@ interface LiveData {
   size: number;
   fw: number;
   fh: number;
+  yaw: number; // 얼굴 각도(mirror 보정, radian)
+  pitch: number;
+  roll: number;
+  face: boolean; // 이 프레임에 실제 얼굴이 있었는지(각도 유효성)
 }
 
 // 매 프레임 검출 상태(얼굴이 안 잡혀도 항상 갱신) — 진단용
@@ -265,6 +279,26 @@ export default function ShootScreen() {
   const [diag, setDiag] = useState<Diag | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [debug, setDebug] = useState(true);
+  // 어긋난 관절 깜빡임용 토글
+  const [blink, setBlink] = useState(false);
+  useEffect(() => {
+    const id = setInterval(() => setBlink((b) => !b), 450);
+    return () => clearInterval(id);
+  }, []);
+
+  // 레퍼런스 자세 분석 — 사진 선택 시 1회(사람이 읽을 수 있는 요약).
+  const poseSummary = useMemo(
+    () => summarizePose(referenceFeatures.pose),
+    [referenceFeatures.pose],
+  );
+  // 레퍼런스 얼굴 각도 분석 — 사진 선택 시 1회.
+  const faceSummary = useMemo(
+    () =>
+      referenceFeatures.hasFace
+        ? summarizeFace(referenceFeatures.orientation)
+        : null,
+    [referenceFeatures.hasFace, referenceFeatures.orientation],
+  );
 
   const [zoom, setZoom] = useState(device?.neutralZoom ?? 1);
   const startZoom = useRef(device?.neutralZoom ?? 1);
@@ -316,12 +350,33 @@ export default function ShootScreen() {
     }
   };
 
+  // 시간적 스무딩 + 실패 프레임 hold. 정지 상태면 가이드도 정지하도록.
+  const smoother = useRef(createLiveSmoother());
+  const lastScores = useRef<MatchScores>(ZERO);
+  const lastGuide = useRef('상체가 보이게 서주세요');
   const report = Worklets.createRunOnJS(
     (s: MatchScores, g: string, ok: boolean, ld: LiveData | null) => {
-      setHasFace(ok);
-      setScores(ok ? s : ZERO);
-      setGuide(g);
-      setLive(ld);
+      const now = Date.now();
+      const sm = smoother.current.update(ld, now);
+      if (ld && ok) {
+        // 양호 프레임: 점수/문구 갱신(이후 hold 구간에서 재사용).
+        lastScores.current = s;
+        lastGuide.current = g;
+      }
+      if (sm) {
+        // 검출 또는 hold 구간: 부드러운 값으로 표시 유지(깜빡임 없음).
+        setHasFace(true);
+        setScores(lastScores.current);
+        setLive(sm as LiveData);
+        setGuide(lastGuide.current);
+      } else {
+        // holdMs 초과로 진짜 사라짐 → 그때만 숨김/초기화.
+        smoother.current.reset();
+        setHasFace(false);
+        setScores(ZERO);
+        setLive(null);
+        setGuide(g);
+      }
     },
   );
   const reportDiag = Worklets.createRunOnJS((d: Diag) => setDiag(d));
@@ -378,6 +433,26 @@ export default function ShootScreen() {
         for (let i = 0; i < fb.length; i++) fb[i] = { x: fb[i].x, y: 1 - fb[i].y };
       }
 
+      // 포즈 수직 자동보정(데이터 기반): 정상 자세는 어깨가 골반보다, 목이 어깨보다
+      // 위(top-left y 작음). 검출 방향에 따라 상하 반전될 수 있어 직접 판정 → flip.
+      // (네이티브가 직립 방향을 고르므로 보통 trigger 안 되지만, 안전장치로 멱등.)
+      if (lf.pose) {
+        const p = lf.pose;
+        const sY =
+          p.leftShoulder && p.rightShoulder
+            ? (p.leftShoulder.y + p.rightShoulder.y) / 2
+            : p.leftShoulder?.y ?? p.rightShoulder?.y;
+        let inverted = false;
+        if (sY != null && p.root) inverted = sY > p.root.y;
+        else if (sY != null && p.neck) inverted = p.neck.y > sY + 0.02;
+        if (inverted) {
+          for (const k of Object.keys(p) as (keyof PoseJoints)[]) {
+            const j = p[k];
+            if (j) j.y = 1 - j.y;
+          }
+        }
+      }
+
       const s0 = matchFace(referenceFeatures, lf);
       // 실루엣 IoU(주력 매칭) — 둘 다 화면(cover)에 매핑한 뒤 실제 겹침 비교.
       // 겹칠수록 점수↑ (위치/크기/구도까지 맞춰야 함).
@@ -418,6 +493,10 @@ export default function ShootScreen() {
           size: lf.framing.size,
           fw: frame.width,
           fh: frame.height,
+          yaw: lf.orientation.yaw,
+          pitch: lf.orientation.pitch,
+          roll: lf.orientation.roll,
+          face: lf.hasFace,
         });
       }
     },
@@ -464,8 +543,8 @@ export default function ShootScreen() {
   const refPoly = svgPolyPoints(toPx(refScreenUnit));
   const livePoly = svgPolyPoints(toPx(liveScreenUnit));
   // 포즈 스켈레톤(자세 매칭 주). 목표=레퍼런스, 라이브=내 관절.
+  // 라이브 포즈는 워클릿에서 데이터 기반으로 이미 상하보정됨 → flipY 불필요.
   const refSkel = poseToScreen(referenceFeatures.pose, refImg.w, refImg.h, W, H, front);
-  // 라이브 포즈는 검출 방향(right) 보정 위해 y 반전.
   const liveSkel = live
     ? poseToScreen(
         live.pose,
@@ -474,9 +553,26 @@ export default function ShootScreen() {
         W,
         H,
         front,
-        true,
+        false,
       )
     : {};
+
+  // 자세 비교(화면 픽셀 공간). target(고스트)을 내 어깨프레임에 앉혀 돌려준다.
+  const liveJ = liveSkel as JMap;
+  const cmp: PoseComparison | null =
+    referenceFeatures.pose && Object.keys(liveSkel).length > 0
+      ? comparePose(referenceFeatures.pose as JMap, liveJ)
+      : null;
+  // 고스트 타깃(내 몸 위 흰색 목표). 라이브 포즈 없으면 절대위치 레퍼런스로 폴백.
+  const ghost = cmp && Object.keys(cmp.target).length > 0 ? cmp.target : null;
+  const targetSkel = (ghost ?? refSkel) as Partial<Record<keyof PoseJoints, Pt>>;
+  const jointOk = cmp?.jointOk ?? {};
+  // 어긋난 관절 색: 빨강(깜빡임). 일치: 초록.
+  const jointColor = (k: keyof PoseJoints): string => {
+    if (jointOk[k] === true) return '#00E08A';
+    if (jointOk[k] === false) return blink ? '#FF3B30' : '#FF8A80';
+    return '#00E08A';
+  };
   // 내 얼굴 위치(프레이밍 중심) → 화면 점. 레퍼런스 얼굴 타원과 맞추도록 유도.
   const liveFacePt =
     live && hasFace
@@ -507,6 +603,56 @@ export default function ShootScreen() {
         : 'rgba(255,255,255,0.9)';
   const iouFill =
     iouVal >= POSE_IOU_GOOD ? 'rgba(0,224,138,0.30)' : 'rgba(255,255,255,0.22)';
+
+  // ── 얼굴 각도(고개) 비교 + 시각 인디케이터(글자보다 우선) ──
+  const faceActive = referenceFeatures.hasFace && !!live && !!live.face;
+  const faceCmp: FaceCompare | null =
+    faceActive && live
+      ? compareFace(referenceFeatures.orientation, {
+          yaw: live.yaw,
+          pitch: live.pitch,
+          roll: live.roll,
+        })
+      : null;
+  // 내 얼굴 중심에 목표(흰)·내(초록/빨강) 기울기선 + yaw/pitch 화살표를 그린다.
+  const faceInd =
+    faceCmp && liveFacePt && live
+      ? (() => {
+          const R = faceGuide ? Math.max(faceGuide.ry, 40) : Math.min(W, H) * 0.14;
+          const cx = liveFacePt.x;
+          const cy = liveFacePt.y;
+          // roll 축선: head-up 방향 = (sinθ, -cosθ). 두 선이 겹치면 roll 일치.
+          const axis = (theta: number) => ({
+            x1: cx - R * Math.sin(theta),
+            y1: cy + R * Math.cos(theta),
+            x2: cx + R * Math.sin(theta),
+            y2: cy - R * Math.cos(theta),
+          });
+          const refAxis = axis(referenceFeatures.orientation.roll);
+          const myAxis = axis(live.roll);
+          // yaw/pitch 는 "facing dot" 겹침으로 안내(미러 부호와 무관하게 수렴).
+          // 점 위치 = 얼굴중심 + (yaw, -pitch)*k. 내 점을 흰 목표점에 겹치면 맞음.
+          const k = R / 0.45;
+          const o = referenceFeatures.orientation;
+          const refDot = { x: cx + o.yaw * k, y: cy - o.pitch * k };
+          const myDot = { x: cx + live.yaw * k, y: cy - live.pitch * k };
+          const dirOk = faceCmp.yawOk && faceCmp.pitchOk;
+          return { cx, cy, R, refAxis, myAxis, refDot, myDot, dirOk };
+        })()
+      : null;
+
+  // 통합 가이드 우선순위: 자세(몸) → 얼굴 각도 → 둘 다 맞으면 완성.
+  const poseDone = !cmp || cmp.allMatched;
+  const faceDone = !faceCmp || faceCmp.ok;
+  const anyGuide = !!cmp || !!faceCmp;
+  const allDone = anyGuide && poseDone && faceDone;
+  const headline = !poseDone
+    ? cmp!.guide
+    : !faceDone
+      ? faceCmp!.guide
+      : allDone
+        ? '✓ 자세·각도 완성! 그대로!'
+        : guide;
 
   return (
     <View style={styles.container}>
@@ -552,10 +698,10 @@ export default function ShootScreen() {
             strokeLinejoin="round"
           />
         )}
-        {/* 목표 스켈레톤(흰, 반투명) — 자세 가이드 */}
+        {/* 목표 스켈레톤(흰, 반투명) — 내 몸 위에 겹친 고스트(또는 폴백: 레퍼런스 위치) */}
         {POSE_EDGES.map(([a, b], i) => {
-          const pa = refSkel[a];
-          const pb = refSkel[b];
+          const pa = targetSkel[a];
+          const pb = targetSkel[b];
           return pa && pb ? (
             <SvgLine
               key={`re${i}`}
@@ -563,22 +709,24 @@ export default function ShootScreen() {
               y1={pa.y}
               x2={pb.x}
               y2={pb.y}
-              stroke="rgba(255,255,255,0.8)"
+              stroke="rgba(255,255,255,0.85)"
               strokeWidth={5}
               strokeLinecap="round"
             />
           ) : null;
         })}
-        {(Object.keys(refSkel) as (keyof PoseJoints)[]).map((k) => {
-          const p = refSkel[k];
+        {(Object.keys(targetSkel) as (keyof PoseJoints)[]).map((k) => {
+          const p = targetSkel[k];
           return p ? (
             <SvgCircle key={`rj${k}`} cx={p.x} cy={p.y} r={6} fill="#fff" />
           ) : null;
         })}
-        {/* 내 실시간 스켈레톤(초록) */}
+        {/* 내 실시간 스켈레톤(선=초록) + 관절점은 일치 여부로 색(초록/빨강 깜빡) */}
         {POSE_EDGES.map(([a, b], i) => {
           const pa = liveSkel[a];
           const pb = liveSkel[b];
+          // 두 관절 중 어긋난 게 있으면 선도 빨강 강조(어디를 움직일지 직관적으로)
+          const bad = jointOk[a] === false || jointOk[b] === false;
           return pa && pb ? (
             <SvgLine
               key={`le${i}`}
@@ -586,16 +734,23 @@ export default function ShootScreen() {
               y1={pa.y}
               x2={pb.x}
               y2={pb.y}
-              stroke="#00E08A"
-              strokeWidth={3.5}
+              stroke={bad ? (blink ? '#FF3B30' : '#FF8A80') : '#00E08A'}
+              strokeWidth={bad ? 4.5 : 3.5}
               strokeLinecap="round"
             />
           ) : null;
         })}
         {(Object.keys(liveSkel) as (keyof PoseJoints)[]).map((k) => {
           const p = liveSkel[k];
+          const bad = jointOk[k] === false;
           return p ? (
-            <SvgCircle key={`lj${k}`} cx={p.x} cy={p.y} r={5} fill="#00E08A" />
+            <SvgCircle
+              key={`lj${k}`}
+              cx={p.x}
+              cy={p.y}
+              r={bad ? 7 : 5}
+              fill={jointColor(k)}
+            />
           ) : null;
         })}
         {/* 얼굴 위치 가이드(목표 타원) */}
@@ -620,11 +775,108 @@ export default function ShootScreen() {
             fill={faceOk ? '#00E08A' : 'rgba(34,211,238,0.9)'}
           />
         )}
+        {/* 얼굴 각도(고개) 인디케이터: 목표 기울기선(흰) + 내 기울기선(roll ok=초록/빨강) */}
+        {faceInd && faceCmp && (
+          <>
+            <SvgLine
+              x1={faceInd.refAxis.x1}
+              y1={faceInd.refAxis.y1}
+              x2={faceInd.refAxis.x2}
+              y2={faceInd.refAxis.y2}
+              stroke="rgba(255,255,255,0.9)"
+              strokeWidth={4}
+              strokeLinecap="round"
+            />
+            <SvgLine
+              x1={faceInd.myAxis.x1}
+              y1={faceInd.myAxis.y1}
+              x2={faceInd.myAxis.x2}
+              y2={faceInd.myAxis.y2}
+              stroke={faceCmp.rollOk ? '#00E08A' : blink ? '#FF3B30' : '#FF8A80'}
+              strokeWidth={3}
+              strokeLinecap="round"
+            />
+            {!faceInd.dirOk && (
+              <SvgLine
+                x1={faceInd.myDot.x}
+                y1={faceInd.myDot.y}
+                x2={faceInd.refDot.x}
+                y2={faceInd.refDot.y}
+                stroke={blink ? '#FF3B30' : '#FFD400'}
+                strokeWidth={3}
+                strokeLinecap="round"
+                strokeDasharray="4 4"
+              />
+            )}
+            <SvgCircle
+              cx={faceInd.refDot.x}
+              cy={faceInd.refDot.y}
+              r={8}
+              fill="none"
+              stroke="rgba(255,255,255,0.95)"
+              strokeWidth={3}
+            />
+            <SvgCircle
+              cx={faceInd.myDot.x}
+              cy={faceInd.myDot.y}
+              r={6}
+              fill={faceInd.dirOk ? '#00E08A' : blink ? '#FF3B30' : '#FF8A80'}
+            />
+          </>
+        )}
       </Svg>
 
       <View pointerEvents="none" style={styles.guideWrap}>
-        <Text style={styles.guideText}>{guide}</Text>
-        {!hasRefSil && (
+        {/* 레퍼런스 자세/각도 요약(1회 분석 결과) */}
+        {poseSummary && (
+          <Text style={styles.summary}>📸 {poseSummary}</Text>
+        )}
+        {faceSummary && (
+          <Text style={styles.summary}>🙂 고개: {faceSummary}</Text>
+        )}
+        {/* 주 가이드: 자세(몸) → 얼굴 각도 → 완성. 없으면 기존 가이드 */}
+        <Text style={[styles.guideText, allDone && styles.guideDone]}>
+          {headline}
+        </Text>
+        {/* 부위별 일치 표시(맞으면 초록). 자세 부위 + 얼굴 각도(각도) */}
+        {anyGuide && (
+          <View style={styles.chips}>
+            {cmp &&
+              (Object.keys(PART_LABEL) as PartKey[]).map((p) => {
+                const st = cmp.parts[p];
+                const c = !st.present
+                  ? 'rgba(255,255,255,0.25)'
+                  : st.ok
+                    ? '#00E08A'
+                    : '#FF3B30';
+                return (
+                  <View
+                    key={p}
+                    style={[styles.chip, { borderColor: c, backgroundColor: `${c}22` }]}
+                  >
+                    <Text style={[styles.chipText, { color: c }]}>
+                      {st.ok && st.present ? '✓ ' : ''}
+                      {PART_LABEL[p]}
+                    </Text>
+                  </View>
+                );
+              })}
+            {faceCmp &&
+              (() => {
+                const c = faceCmp.ok ? '#00E08A' : '#FF3B30';
+                return (
+                  <View
+                    style={[styles.chip, { borderColor: c, backgroundColor: `${c}22` }]}
+                  >
+                    <Text style={[styles.chipText, { color: c }]}>
+                      {faceCmp.ok ? '✓ ' : ''}각도
+                    </Text>
+                  </View>
+                );
+              })()}
+          </View>
+        )}
+        {!hasRefSil && !cmp && (
           <Text style={styles.warn}>이 레퍼런스에서 인물 실루엣을 못 잡았어요</Text>
         )}
       </View>
@@ -643,6 +895,10 @@ export default function ShootScreen() {
             {'\n'}POSE 관절={diag?.poseN ?? 0} obs={diag?.poseObs ?? 0} raw=
             {diag?.poseRaw ?? 0} ori={diag?.poseOri ?? '-'} refPose=
             {referenceFeatures.pose ? 'Y' : 'N'}
+            {'\n'}CMP worst={cmp?.worst ?? '-'} done={cmp?.allMatched ? 'Y' : 'N'}{' '}
+            ghost={ghost ? 'Y' : 'N'}
+            {'\n'}FACE각도 worst={faceCmp?.worst ?? '-'} ok={faceCmp?.ok ? 'Y' : 'N'}{' '}
+            y/p/r={live ? `${live.yaw.toFixed(2)}/${live.pitch.toFixed(2)}/${live.roll.toFixed(2)}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>
         </Pressable>
@@ -745,6 +1001,33 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     overflow: 'hidden',
   },
+  guideDone: { color: '#0D0D0F', backgroundColor: '#00E08A' },
+  summary: {
+    color: '#FFF',
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 8,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  chips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+  },
+  chip: {
+    borderWidth: 1.5,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  chipText: { fontSize: 12, fontWeight: '700' },
   warn: {
     color: '#FFD400',
     fontSize: 12,
