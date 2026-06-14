@@ -157,13 +157,13 @@ export default function ShootScreen() {
     console.log(
       `[front-selected] FOV=${format?.fieldOfView?.toFixed(1)} ${format?.videoWidth}x${format?.videoHeight}`,
     );
-    // 판정 힌트: 포맷 간 화각 차이가 거의 없으면 포맷 고정으로는 못 넓힘(네이티브도 동일 한계).
+    // 판정: 우리가 최대 화각 포맷을 적용 중인가? 이게 하드웨어/VisionCamera 한계.
+    const selFov = format?.fieldOfView ?? 0;
+    const atMax = selFov >= fovMax - 0.5;
     console.log(
-      `[front-verdict] ${
-        spread < 2
-          ? '모든 포맷 화각 거의 동일 → VisionCamera 포맷 고정으로 더 넓힐 수 없음(이 기기 전면은 풀FOV가 이미 최대; 네이티브도 동일)'
-          : `넓은 포맷 존재(최대 ${fovMax.toFixed(0)}°) → 그 포맷 고정 시 넓어짐. 기본보다 넓은지 순정 0.5x와 비교`
-      }`,
+      `[front-verdict] 선택FOV=${selFov.toFixed(1)}° 최대=${fovMax.toFixed(1)}° ${
+        atMax ? '(최대 적용됨)' : '(⚠️최대 아님)'
+      } · 이게 VisionCamera 한계(하드웨어 포맷 최대 = 네이티브로도 동일). 순정 0.5x와 비교: 비슷하면 끝, 순정이 확연히 넓으면 VisionCamera가 더 넓은 포맷을 노출 안 한 것 → 네이티브 검토`,
     );
   }, [device, position, format]);
 
