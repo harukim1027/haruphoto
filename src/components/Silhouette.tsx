@@ -43,12 +43,14 @@ export default function Silhouette({
   bodyOutline,
   joints,
   color,
+  fillColor,
   width = 3,
 }: {
   faceContour?: Pt[];
   bodyOutline?: Pt[]; // 인물 분할 실루엣(있으면 관절 막대기 대신 이걸 그림)
   joints?: ScreenJoints;
   color: string;
+  fillColor?: string; // 있으면 실루엣 내부를 반투명 채움("여기 맞춰라" 가이드)
   width?: number;
 }) {
   const face = useMemo(() => closedPath(faceContour), [faceContour]);
@@ -61,6 +63,9 @@ export default function Silhouette({
   if (!face && !silhouette && !body) return null;
   return (
     <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
+      {silhouette && fillColor && (
+        <Path path={silhouette} style="fill" color={fillColor} />
+      )}
       {silhouette && (
         <Path
           path={silhouette}

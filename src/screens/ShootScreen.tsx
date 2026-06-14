@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   StyleSheet,
@@ -20,12 +20,7 @@ import { Worklets, useSharedValue } from 'react-native-worklets-core';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
-import {
-  toFaceFeatures,
-  type FaceVisionResult,
-  type PoseJoints,
-  type Pt,
-} from '../face/types';
+import { toFaceFeatures, type FaceVisionResult, type Pt } from '../face/types';
 import {
   matchFace,
   MATCH_THRESHOLD,
@@ -34,6 +29,12 @@ import {
   type MatchScores,
 } from '../face/matchFace';
 import { guideText } from '../face/guide';
+import {
+  normalizeSilhouette,
+  silhouetteIoU,
+  placeUnit,
+  POSE_IOU_GOOD,
+} from '../face/silhouette';
 import Silhouette from '../components/Silhouette';
 import type { RootStackParamList } from '../../App';
 
@@ -73,13 +74,11 @@ const ZERO: MatchScores = {
 };
 
 interface LiveData {
-  pose?: PoseJoints; // un-mirror 보정됨 (프리뷰 사용자 몸 위치에 일치)
-  faceContour?: Pt[]; // un-mirror 보정된 얼굴 외곽
-  bodyOutline?: Pt[]; // un-mirror 보정된 몸 실루엣
+  bodyOutline?: Pt[]; // un-mirror 보정된 몸 실루엣 (이미지 정규화)
+  iou: number; // 레퍼런스 실루엣과의 겹침(주력 매칭)
   cx: number;
   cy: number;
   size: number;
-  poseCount: number;
   fw: number;
   fh: number;
 }
@@ -93,45 +92,6 @@ interface Diag {
   silN: number;
   fw: number;
   fh: number;
-}
-
-// 정규화 top-left 점들 → 화면 좌표 (cover crop 보정).
-function toScreenContour(
-  pts: Pt[] | undefined,
-  imgW: number,
-  imgH: number,
-  contW: number,
-  contH: number,
-): Pt[] | undefined {
-  if (!pts || pts.length < 3 || imgW <= 0 || imgH <= 0) return undefined;
-  const scale = Math.max(contW / imgW, contH / imgH);
-  const dW = imgW * scale;
-  const dH = imgH * scale;
-  const offX = (contW - dW) / 2;
-  const offY = (contH - dH) / 2;
-  return pts.map((p) => ({ x: offX + p.x * dW, y: offY + p.y * dH }));
-}
-
-// 관절(정규화) → 화면 좌표. cover crop 보정 + (전면이면 toFaceFeatures가 이미 un-mirror).
-function toScreenJoints(
-  pose: PoseJoints | undefined,
-  imgW: number,
-  imgH: number,
-  contW: number,
-  contH: number,
-): Partial<Record<keyof PoseJoints, Pt>> {
-  const out: Partial<Record<keyof PoseJoints, Pt>> = {};
-  if (!pose || imgW <= 0 || imgH <= 0) return out;
-  const scale = Math.max(contW / imgW, contH / imgH);
-  const dW = imgW * scale;
-  const dH = imgH * scale;
-  const offX = (contW - dW) / 2;
-  const offY = (contH - dH) / 2;
-  for (const k of Object.keys(pose) as (keyof PoseJoints)[]) {
-    const j = pose[k];
-    if (j && j.c > 0.3) out[k] = { x: offX + j.x * dW, y: offY + j.y * dH };
-  }
-  return out;
 }
 
 export default function ShootScreen() {
@@ -152,8 +112,13 @@ export default function ShootScreen() {
   const cameraRef = useRef<Camera>(null);
   const front = position === 'front';
 
-  const refPose = referenceFeatures.pose;
   const refImg = referenceFeatures.imageSize ?? { w: 3, h: 4 };
+  // 레퍼런스 실루엣을 인물 bbox 기준 단위정사각형으로 1회 정규화(캐싱).
+  const refUnitSil = useMemo(
+    () => normalizeSilhouette(referenceFeatures.bodyOutline, refImg.w, refImg.h),
+    [referenceFeatures.bodyOutline, refImg.w, refImg.h],
+  );
+  const hasRefSil = !!refUnitSil && refUnitSil.length >= 3;
 
   const [scores, setScores] = useState<MatchScores>(ZERO);
   const [guide, setGuide] = useState('상체가 보이게 서주세요');
@@ -267,13 +232,32 @@ export default function ShootScreen() {
         return;
       }
 
-      const s = matchFace(referenceFeatures, lf);
-      const allGood =
-        (!s.hasPose || s.pose >= MATCH_THRESHOLD) &&
-        s.framing >= MATCH_THRESHOLD &&
-        s.orientation >= MATCH_THRESHOLD &&
-        s.expression >= MATCH_THRESHOLD &&
-        s.gaze >= MATCH_THRESHOLD;
+      const s0 = matchFace(referenceFeatures, lf);
+      // 실루엣 IoU(주력 매칭) — 레퍼런스/라이브를 각자 bbox 기준 정규화 후 겹침 비교.
+      const lw = Math.min(frame.width, frame.height);
+      const lh = Math.max(frame.width, frame.height);
+      const liveUnit = normalizeSilhouette(lf.bodyOutline, lw, lh);
+      const iou = hasRefSil ? silhouetteIoU(refUnitSil, liveUnit) : 0;
+      const s = hasRefSil
+        ? {
+            ...s0,
+            pose: iou,
+            hasPose: true,
+            overall:
+              iou * 0.6 +
+              s0.framing * 0.16 +
+              s0.orientation * 0.1 +
+              s0.expression * 0.08 +
+              s0.gaze * 0.06,
+          }
+        : s0;
+      // 실루엣 매칭이 가능하면 셔터는 IoU 기준, 아니면 기존 얼굴 기준.
+      const allGood = hasRefSil
+        ? iou >= POSE_IOU_GOOD
+        : s0.framing >= MATCH_THRESHOLD &&
+          s0.orientation >= MATCH_THRESHOLD &&
+          s0.expression >= MATCH_THRESHOLD &&
+          s0.gaze >= MATCH_THRESHOLD;
 
       if (now >= cooldownUntil.value) {
         if (allGood) {
@@ -290,22 +274,25 @@ export default function ShootScreen() {
 
       if (now - lastReport.value > 120) {
         lastReport.value = now;
-        const g = allGood ? '완벽해요! 그대로!' : guideText(referenceFeatures, lf, s);
-        const pc = lf.pose ? Object.keys(lf.pose).length : 0;
+        const g = !hasRefSil
+          ? guideText(referenceFeatures, lf, s)
+          : iou >= POSE_IOU_GOOD
+            ? '완벽해요! 그대로!'
+            : iou >= 0.3
+              ? '거의 맞았어요 — 조금 더'
+              : '실루엣 안에 몸을 맞춰요';
         report(s, g, true, {
-          pose: lf.pose,
-          faceContour: lf.faceContour,
           bodyOutline: lf.bodyOutline,
+          iou,
           cx: lf.framing.cx,
           cy: lf.framing.cy,
           size: lf.framing.size,
-          poseCount: pc,
           fw: frame.width,
           fh: frame.height,
         });
       }
     },
-    [referenceFeatures, report, reportDiag, triggerShutter],
+    [referenceFeatures, refUnitSil, hasRefSil, report, reportDiag, triggerShutter],
   );
 
   if (!hasPermission || device == null) {
@@ -321,29 +308,25 @@ export default function ShootScreen() {
   const presets = ZOOM_PRESETS.filter((d) => presetAvailable(d, device));
   const activeMul = zoomToDisplay(zoom, device);
 
-  // 라이브 프레임의 oriented 종횡비 추정(세로 프리뷰 가정: 짧은변=가로)
-  const liveW = live ? Math.min(live.fw, live.fh) : W;
-  const liveH = live ? Math.max(live.fw, live.fh) : H;
-  const targetJoints = toScreenJoints(refPose, refImg.w, refImg.h, W, H);
-  const liveJoints = toScreenJoints(live?.pose, liveW, liveH, W, H);
-  const targetFace = toScreenContour(
-    referenceFeatures.faceContour,
-    refImg.w,
-    refImg.h,
-    W,
-    H,
-  );
-  const targetBody = toScreenContour(
-    referenceFeatures.bodyOutline,
-    refImg.w,
-    refImg.h,
-    W,
-    H,
-  );
-  const liveFace = toScreenContour(live?.faceContour, liveW, liveH, W, H);
-  const liveBody = toScreenContour(live?.bodyOutline, liveW, liveH, W, H);
-  const hasTarget = targetFace || targetBody || Object.keys(targetJoints).length > 0;
-  const hasLive = liveFace || liveBody || Object.keys(liveJoints).length > 0;
+  // 레퍼런스(고정 목표)·라이브 실루엣을 같은 단위정사각형 → 화면 타깃에 배치.
+  const liveUnitSil = live
+    ? normalizeSilhouette(
+        live.bodyOutline,
+        Math.min(live.fw, live.fh),
+        Math.max(live.fw, live.fh),
+      )
+    : null;
+  const placedRef = placeUnit(refUnitSil, W, H);
+  const placedLive = placeUnit(liveUnitSil, W, H);
+  const iouVal = live?.iou ?? 0;
+  const iouColor =
+    iouVal >= POSE_IOU_GOOD
+      ? '#00E08A'
+      : iouVal >= 0.3
+        ? '#FFD400'
+        : 'rgba(255,255,255,0.9)';
+  const iouFill =
+    iouVal >= POSE_IOU_GOOD ? 'rgba(0,224,138,0.22)' : 'rgba(255,255,255,0.18)';
 
   return (
     <View style={styles.container}>
@@ -360,31 +343,22 @@ export default function ShootScreen() {
         />
       </GestureDetector>
 
-      {/* 목표 윤곽(레퍼런스): 흰색 반투명 */}
-      {hasTarget && (
+      {/* 레퍼런스 실루엣: 고정 반투명 오버레이("여기 몸을 맞춰라"). IoU 오르면 초록. */}
+      {placedRef && (
         <Silhouette
-          faceContour={targetFace}
-          bodyOutline={targetBody}
-          joints={targetJoints}
-          color="rgba(255,255,255,0.7)"
+          bodyOutline={placedRef}
+          color={iouColor}
+          fillColor={iouFill}
           width={4}
         />
       )}
-      {/* 내 실시간 윤곽: 초록 (얼굴/포즈/실루엣 데이터 있을 때만) */}
-      {hasLive && (
-        <Silhouette
-          faceContour={liveFace}
-          bodyOutline={liveBody}
-          joints={liveJoints}
-          color="#00E08A"
-          width={3}
-        />
-      )}
+      {/* 내 실시간 실루엣: 초록 외곽선 */}
+      {placedLive && <Silhouette bodyOutline={placedLive} color="#00E08A" width={2} />}
 
       <View pointerEvents="none" style={styles.guideWrap}>
         <Text style={styles.guideText}>{guide}</Text>
-        {!refPose && (
-          <Text style={styles.warn}>이 레퍼런스는 상체가 적게 나와 자세 가이드가 없어요</Text>
+        {!hasRefSil && (
+          <Text style={styles.warn}>이 레퍼런스에서 인물 실루엣을 못 잡았어요</Text>
         )}
       </View>
 
@@ -396,8 +370,8 @@ export default function ShootScreen() {
             {device.neutralZoom.toFixed(3)} max={device.maxZoom.toFixed(1)}
             {'\n'}lenses=[{device.physicalDevices.join(',')}]
             {'\n'}presets={presets.join('/')} ultraWide={device.minZoom < 1 ? 'Y' : 'N'}
-            {'\n'}FACE found={diag?.found ? 'Y' : 'N'} noFace={diag?.noFace ? 'Y' : 'N'}{' '}
-            윤곽={diag?.contourN ?? 0} 관절={diag?.poseN ?? 0} 실루엣={diag?.silN ?? 0}{' '}
+            {'\n'}FACE found={diag?.found ? 'Y' : 'N'} 실루엣={diag?.silN ?? 0} refSil=
+            {hasRefSil ? refUnitSil!.length : 0} IoU={Math.round(iouVal * 100)}{' '}
             frame={diag ? `${diag.fw}x${diag.fh}` : '-'}
             {'\n'}(탭하면 숨김)
           </Text>
@@ -405,7 +379,7 @@ export default function ShootScreen() {
       )}
 
       <View pointerEvents="none" style={styles.bars}>
-        {scores.hasPose && <Bar label="자세" v={scores.pose} big />}
+        {scores.hasPose && <Bar label="실루엣" v={scores.pose} big />}
         <Bar label="구도" v={scores.framing} />
         <Bar label="각도" v={scores.orientation} />
         <Bar label="표정" v={scores.expression} />
