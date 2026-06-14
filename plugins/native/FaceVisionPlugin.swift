@@ -45,7 +45,7 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     var bodyOutline: [[Double]]?
     if #available(iOS 15.0, *),
        let seg = segReq?.results?.first as? VNPixelBufferObservation {
-      bodyOutline = Self.bodySilhouette(seg.pixelBuffer)
+      bodyOutline = Self.bodySilhouette(seg.pixelBuffer, eps: 0.006) // 라이브: 디테일/성능 균형
     }
     func finalize(_ base: [String: Any]) -> [String: Any] {
       var r = base
@@ -120,38 +120,82 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
     }
   }
 
-  /// 인물 분할 마스크 → 몸 실루엣 외곽 폴리곤 (top-left 정규화, 닫힌 형태).
-  static func bodySilhouette(_ mask: CVPixelBuffer) -> [[Double]]? {
+  /// 인물 분할 마스크 → 실제 경계 contour(Moore 추적) → DP 단순화.
+  /// 행-스캔 envelope 대신 진짜 외곽을 따라가 목-어깨-팔 굴곡까지 표현.
+  /// eps: 단순화 강도(정규화 좌표). 작을수록 디테일↑.
+  static func bodySilhouette(_ mask: CVPixelBuffer, eps: Double = 0.005) -> [[Double]]? {
     CVPixelBufferLockBaseAddress(mask, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
     let w = CVPixelBufferGetWidth(mask)
     let h = CVPixelBufferGetHeight(mask)
-    guard w > 2, h > 2, let base = CVPixelBufferGetBaseAddress(mask) else { return nil }
+    guard w > 4, h > 4, let base = CVPixelBufferGetBaseAddress(mask) else { return nil }
     let bpr = CVPixelBufferGetBytesPerRow(mask)
     let ptr = base.assumingMemoryBound(to: UInt8.self)
     let thr: UInt8 = 128
-    let rows = min(96, h) // 행 샘플 ↑ → 외곽 디테일 ↑
-    var left: [[Double]] = []
-    var right: [[Double]] = []
-    for i in 0..<rows {
-      let y = Int(Double(i) / Double(rows - 1) * Double(h - 1))
-      let rowPtr = ptr + y * bpr
-      var minX = -1, maxX = -1
-      var x = 0
-      while x < w {
-        if rowPtr[x] >= thr { if minX < 0 { minX = x }; maxX = x }
-        x += 1
+    func fg(_ x: Int, _ y: Int) -> Bool {
+      x >= 0 && x < w && y >= 0 && y < h && ptr[y * bpr + x] >= thr
+    }
+    var start: (Int, Int)?
+    outer: for y in 0..<h { for x in 0..<w where fg(x, y) { start = (x, y); break outer } }
+    guard let s = start else { return nil }
+    // 시계방향 8이웃 (E,SE,S,SW,W,NW,N,NE)
+    let nb = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+    var contour: [[Double]] = [[Double(s.0) / Double(w - 1), Double(s.1) / Double(h - 1)]]
+    var cur = s
+    var backIdx = 4
+    let maxSteps = (w + h) * 8
+    var steps = 0
+    repeat {
+      var found = false
+      for k in 1...8 {
+        let i = (backIdx + k) % 8
+        let nx = cur.0 + nb[i].0, ny = cur.1 + nb[i].1
+        if fg(nx, ny) {
+          backIdx = (i + 4) % 8
+          cur = (nx, ny)
+          contour.append([Double(nx) / Double(w - 1), Double(ny) / Double(h - 1)])
+          found = true
+          break
+        }
       }
-      if minX >= 0 {
-        let ny = Double(y) / Double(h - 1)
-        left.append([Double(minX) / Double(w - 1), ny])
-        right.append([Double(maxX) / Double(w - 1), ny])
+      if !found { break }
+      steps += 1
+    } while !(cur == s) && steps < maxSteps
+    if contour.count < 8 { return nil }
+    return Self.douglasPeucker(contour, eps: eps)
+  }
+
+  /// Douglas-Peucker 단순화(점 수 줄이되 굴곡 보존).
+  static func douglasPeucker(_ pts: [[Double]], eps: Double) -> [[Double]] {
+    if pts.count < 3 { return pts }
+    func segDist2(_ p: [Double], _ a: [Double], _ b: [Double]) -> Double {
+      let dx = b[0] - a[0], dy = b[1] - a[1]
+      let l = dx * dx + dy * dy
+      if l < 1e-12 { return (p[0]-a[0])*(p[0]-a[0]) + (p[1]-a[1])*(p[1]-a[1]) }
+      var t = ((p[0]-a[0]) * dx + (p[1]-a[1]) * dy) / l
+      t = max(0, min(1, t))
+      let px = a[0] + t * dx, py = a[1] + t * dy
+      return (p[0]-px)*(p[0]-px) + (p[1]-py)*(p[1]-py)
+    }
+    var keep = [Bool](repeating: false, count: pts.count)
+    keep[0] = true; keep[pts.count - 1] = true
+    var stack: [(Int, Int)] = [(0, pts.count - 1)]
+    let e2 = eps * eps
+    while let (s, e) = stack.popLast() {
+      if e <= s + 1 { continue }
+      var maxD = 0.0, idx = -1
+      for i in (s + 1)..<e {
+        let d = segDist2(pts[i], pts[s], pts[e])
+        if d > maxD { maxD = d; idx = i }
+      }
+      if maxD > e2 && idx >= 0 {
+        keep[idx] = true
+        stack.append((s, idx)); stack.append((idx, e))
       }
     }
-    if left.count < 3 { return nil }
-    var poly = left
-    poly.append(contentsOf: right.reversed())
-    return poly
+    var out: [[Double]] = []
+    for i in 0..<pts.count where keep[i] { out.append(pts[i]) }
+    return out
   }
 
   /// 상체 관절 → top-left 정규화 + 신뢰도

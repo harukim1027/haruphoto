@@ -2,7 +2,6 @@ import React, { useMemo } from 'react';
 import { Canvas, Path, Skia } from '@shopify/react-native-skia';
 import { StyleSheet } from 'react-native';
 import type { PoseJoints, Pt } from '../face/types';
-import { smoothEdges, SILHOUETTE_SMOOTH_WIN } from '../face/silhouette';
 
 type ScreenJoints = Partial<Record<keyof PoseJoints, Pt>>;
 
@@ -55,11 +54,8 @@ export default function Silhouette({
   width?: number;
 }) {
   const face = useMemo(() => closedPath(faceContour), [faceContour]);
-  // 촬영 화면과 동일한 약한 스무딩 → 두 화면 실루엣 모양 일치.
-  const silhouette = useMemo(
-    () => closedPath(smoothEdges(bodyOutline ?? null, SILHOUETTE_SMOOTH_WIN)),
-    [bodyOutline],
-  );
+  // contour(닫힌 루프)는 네이티브에서 추적·단순화됨 → 직선 그대로(디테일 유지).
+  const silhouette = useMemo(() => closedPath(bodyOutline), [bodyOutline]);
   // 실루엣이 있으면 막대기는 생략(자세를 몸 외곽선으로 보여줌)
   const body = useMemo(
     () => (!bodyOutline && joints ? bodyPath(joints) : null),

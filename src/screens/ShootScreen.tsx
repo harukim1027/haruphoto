@@ -33,9 +33,7 @@ import {
   silhouetteIoU,
   coverUnit,
   coverPoint,
-  smoothEdges,
   svgPolyPoints,
-  SILHOUETTE_SMOOTH_WIN,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
 import Svg, {
@@ -462,12 +460,9 @@ export default function ShootScreen() {
       )
     : null;
   // 레퍼런스/라이브 동일 파이프라인(약한 스무딩 + 직선 폴리곤) → 디테일 유지·모양 일치.
-  const refPoly = svgPolyPoints(
-    smoothEdges(toPx(refScreenUnit), SILHOUETTE_SMOOTH_WIN),
-  );
-  const livePoly = svgPolyPoints(
-    smoothEdges(toPx(liveScreenUnit), SILHOUETTE_SMOOTH_WIN),
-  );
+  // contour(닫힌 루프)는 네이티브 DP로 이미 정리됨 → 직선 그대로(디테일 유지).
+  const refPoly = svgPolyPoints(toPx(refScreenUnit));
+  const livePoly = svgPolyPoints(toPx(liveScreenUnit));
   // 포즈 스켈레톤(자세 매칭 주). 목표=레퍼런스, 라이브=내 관절.
   const refSkel = poseToScreen(referenceFeatures.pose, refImg.w, refImg.h, W, H, front);
   // 라이브 포즈는 검출 방향(right) 보정 위해 y 반전.
