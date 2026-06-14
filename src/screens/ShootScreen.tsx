@@ -34,10 +34,11 @@ import {
   coverUnit,
   coverPoint,
   smoothEdges,
-  toSmoothPathD,
+  svgPolyPoints,
+  SILHOUETTE_SMOOTH_WIN,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
-import Svg, { Path as SvgPath, Ellipse, Circle as SvgCircle } from 'react-native-svg';
+import Svg, { Polygon, Ellipse, Circle as SvgCircle } from 'react-native-svg';
 import type { RootStackParamList } from '../../App';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Shoot'>;
@@ -433,8 +434,13 @@ export default function ShootScreen() {
         front,
       )
     : null;
-  const refD = toSmoothPathD(smoothEdges(toPx(refScreenUnit)));
-  const liveD = toSmoothPathD(smoothEdges(toPx(liveScreenUnit)));
+  // 레퍼런스/라이브 동일 파이프라인(약한 스무딩 + 직선 폴리곤) → 디테일 유지·모양 일치.
+  const refPoly = svgPolyPoints(
+    smoothEdges(toPx(refScreenUnit), SILHOUETTE_SMOOTH_WIN),
+  );
+  const livePoly = svgPolyPoints(
+    smoothEdges(toPx(liveScreenUnit), SILHOUETTE_SMOOTH_WIN),
+  );
   // 내 얼굴 위치(프레이밍 중심) → 화면 점. 레퍼런스 얼굴 타원과 맞추도록 유도.
   const liveFacePt =
     live && hasFace
@@ -490,23 +496,23 @@ export default function ShootScreen() {
         height={H}
         pointerEvents="none"
       >
-        {/* 레퍼런스(목표): 반투명 채움 + 외곽선. 실제 구도 위치. "여기 몸을 맞춰라" */}
-        {refD && (
-          <SvgPath
-            d={refD}
+        {/* 레퍼런스(목표): 반투명 채움 + 흰 외곽선. "여기 몸을 맞춰라" */}
+        {refPoly && (
+          <Polygon
+            points={refPoly}
             fill={iouFill}
             stroke={iouColor}
-            strokeWidth={5}
+            strokeWidth={4}
             strokeLinejoin="round"
           />
         )}
-        {/* 내 실시간 실루엣: 얇은 흰색 외곽선 */}
-        {liveD && (
-          <SvgPath
-            d={liveD}
+        {/* 내 실시간 실루엣: 초록 외곽선(목표와 구분) */}
+        {livePoly && (
+          <Polygon
+            points={livePoly}
             fill="none"
-            stroke="rgba(255,255,255,0.85)"
-            strokeWidth={2}
+            stroke="#00E08A"
+            strokeWidth={2.5}
             strokeLinejoin="round"
           />
         )}

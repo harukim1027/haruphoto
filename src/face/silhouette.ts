@@ -153,6 +153,18 @@ export function smoothEdges(pts: Pt[] | null, win = 4): Pt[] | null {
   return [...avg(pts.slice(0, L)), ...avg(pts.slice(L))];
 }
 
+// 화면 픽셀 점들 → SVG <Polygon> points 문자열(직선, 디테일 보존).
+// 레퍼런스/촬영이 '같은 방식'으로 그리도록 공통 사용.
+export function svgPolyPoints(pts: Pt[] | null | undefined): string | null {
+  if (!pts || pts.length < 3) return null;
+  let s = '';
+  for (const p of pts) s += `${p.x.toFixed(1)},${p.y.toFixed(1)} `;
+  return s.trim();
+}
+
+// 실루엣 표시용 공통 스무딩 강도(레퍼런스/촬영 동일하게). 너무 높이면 뭉개짐.
+export const SILHOUETTE_SMOOTH_WIN = 2;
+
 // 점들을 부드러운 닫힌 곡선(2차 베지어, 중점 통과) SVG path d 로.
 export function toSmoothPathD(pts: Pt[] | null): string | null {
   if (!pts || pts.length < 3) return null;
