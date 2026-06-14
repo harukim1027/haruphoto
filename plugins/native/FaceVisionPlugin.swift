@@ -79,9 +79,14 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
       try? h.perform([req])
       return req.results?.first
     }
+    func rawCount(_ o: VNHumanBodyPoseObservation) -> Int {
+      (try? o.recognizedPoints(.all))?.values.filter { $0.confidence > 0 }.count ?? 0
+    }
+    // 캐시된 방향 우선(좌표계 안정). 그 방향이 잡히면 그대로 사용.
     let useOri = poseBestOri ?? primary
     var obs = run(useOri)
     var usedOri = useOri
+    // 캐시 실패 시 1초마다 8방향 스윕 → 관절 가장 많은 방향 채택(우연 검출 배제).
     if obs == nil {
       let now = Date().timeIntervalSince1970
       if now - poseLastSweep > 1.0 {
@@ -89,17 +94,19 @@ public class FaceVisionPlugin: FrameProcessorPlugin {
         let all: [CGImagePropertyOrientation] = [
           .up, .right, .left, .down, .upMirrored, .rightMirrored, .leftMirrored, .downMirrored,
         ]
-        for ori in all where ori != useOri {
-          if let o = run(ori) { obs = o; usedOri = ori; poseBestOri = ori; break }
+        var bestRaw = -1
+        for ori in all {
+          if let o = run(ori) {
+            let r = rawCount(o)
+            if r > bestRaw { bestRaw = r; obs = o; usedOri = ori }
+          }
         }
+        // 충분히 강한 검출만 채택·캐시(약한 우연 방향 거부 → 안정화).
+        if bestRaw >= 6 { poseBestOri = usedOri } else { obs = nil }
       }
     }
     guard let body = obs else { return (nil, 0, 0, "none") }
-    var raw = 0
-    if let pts = try? body.recognizedPoints(.all) {
-      raw = pts.values.filter { $0.confidence > 0 }.count
-    }
-    return (poseJoints(body), 1, raw, oriName(usedOri))
+    return (poseJoints(body), 1, rawCount(body), oriName(usedOri))
   }
 
   static func oriName(_ o: CGImagePropertyOrientation) -> String {
