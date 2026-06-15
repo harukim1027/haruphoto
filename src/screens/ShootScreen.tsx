@@ -44,6 +44,10 @@ import {
   coverUnit,
   coverPoint,
   svgPolyPoints,
+  framingFromUnits,
+  framingGuide,
+  unitBBox,
+  type FramingResult,
   POSE_IOU_GOOD,
 } from '../face/silhouette';
 import Svg, {
@@ -328,6 +332,7 @@ export default function ShootScreen() {
 
   const lastReport = useSharedValue(0);
   const lastLog = useSharedValue(0);
+  const lastFrLog = useSharedValue(0);
 
   useEffect(() => {
     if (!hasPermission) requestPermission();
@@ -417,6 +422,7 @@ export default function ShootScreen() {
           fw: frame.width,
           fh: frame.height,
         });
+
       }
 
       if (!lf) {
@@ -460,14 +466,57 @@ export default function ShootScreen() {
       const lh = Math.max(frame.width, frame.height);
       const liveScreenUnit = coverUnit(lf.bodyOutline, lw, lh, W, H, front);
       const iou = hasRefSil ? silhouetteIoU(refScreenUnit, liveScreenUnit) : 0;
+      // 구도(framing): 얼굴 bbox 를 주 신호로(위치+거리 민감). 단, 라이브 얼굴 세로(cy)가
+      // 검출 방향 오류로 반전될 수 있어 '얼굴은 인물 상단' 가정으로 자동 보정.
+      // 얼굴 없을 때만 실루엣 bbox 로 폴백(포화되지만 0은 면함).
+      const silFr = hasRefSil ? framingFromUnits(refScreenUnit, liveScreenUnit) : null;
+      let frUse: FramingResult | null = silFr;
+      let frSrc = 'sil';
+      if (referenceFeatures.hasFace && lf.hasFace) {
+        const rcx = referenceFeatures.framing.cx;
+        const rcy = referenceFeatures.framing.cy;
+        const rsz = referenceFeatures.framing.size;
+        const lcx = lf.framing.cx;
+        let lcy = lf.framing.cy;
+        const lsz = lf.framing.size;
+        // 세로 반전 자동 판정: 얼굴 cy 가 인물 실루엣 중심보다 아래면 뒤집힘 → 1-cy.
+        const lBox = unitBBox(lf.bodyOutline);
+        if (lBox && lcy > lBox.cy + 0.05) lcy = 1 - lcy;
+        const dpos = Math.hypot(rcx - lcx, rcy - lcy);
+        const dsize = Math.abs(rsz - lsz) / Math.max(rsz, 0.01);
+        const sc =
+          (Math.max(0, Math.min(1, 1 - dpos / 0.16)) +
+            Math.max(0, Math.min(1, 1 - dsize / 0.45))) /
+          2;
+        frUse = {
+          score: sc,
+          dpos,
+          dsize,
+          ref: { cx: rcx, cy: rcy, w: 0, h: 0, size: rsz },
+          live: { cx: lcx, cy: lcy, w: 0, h: 0, size: lsz },
+        };
+        frSrc = 'face';
+      }
+      const framingScore = frUse ? frUse.score : s0.framing;
+      // 진단: 구도 점수(0 병목 해결 + 민감도 확인용).
+      if (frUse && now - lastFrLog.value > 500) {
+        lastFrLog.value = now;
+        console.log(
+          '[framing2]', frSrc, 'score=', framingScore.toFixed(2),
+          'dpos=', frUse.dpos.toFixed(3), 'dsize=', frUse.dsize.toFixed(3),
+          'ref=', frUse.ref ? `${frUse.ref.cx.toFixed(2)},${frUse.ref.cy.toFixed(2)} s${frUse.ref.size.toFixed(2)}` : '-',
+          'live=', frUse.live ? `${frUse.live.cx.toFixed(2)},${frUse.live.cy.toFixed(2)} s${frUse.live.size.toFixed(2)}` : '-',
+        );
+      }
       const s = hasRefSil
         ? {
             ...s0,
             pose: iou,
+            framing: framingScore,
             hasPose: true,
             overall:
-              iou * 0.6 +
-              s0.framing * 0.16 +
+              iou * 0.5 +
+              framingScore * 0.26 +
               s0.orientation * 0.1 +
               s0.expression * 0.08 +
               s0.gaze * 0.06,
@@ -477,13 +526,17 @@ export default function ShootScreen() {
 
       if (now - lastReport.value > 120) {
         lastReport.value = now;
+        // 구도 어긋남 우선 안내(가까이/멀리/위/아래) → 실루엣 맞추기.
+        const fg = frUse ? framingGuide(frUse) : '';
         const g = !hasRefSil
           ? guideText(referenceFeatures, lf, s)
-          : iou >= POSE_IOU_GOOD
+          : iou >= POSE_IOU_GOOD && framingScore >= 0.7
             ? '완벽해요! 그대로!'
-            : iou >= 0.3
-              ? '거의 맞았어요 — 조금 더'
-              : '실루엣 안에 몸을 맞춰요';
+            : fg !== ''
+              ? fg
+              : iou >= 0.3
+                ? '거의 맞았어요 — 조금 더'
+                : '실루엣 안에 몸을 맞춰요';
         report(s, g, true, {
           bodyOutline: lf.bodyOutline,
           pose: lf.pose,

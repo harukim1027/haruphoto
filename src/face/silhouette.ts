@@ -132,6 +132,75 @@ export function placeUnit(
 // 실루엣 매칭(IoU) 양호 임계 — IoU는 0.6 이상이면 상당히 겹친 것.
 export const POSE_IOU_GOOD = 0.55;
 
+// ── 구도(framing): 인물 실루엣 bbox 로 계산 ──
+// 얼굴 bbox(라이브에서 자주 noFace)에 의존하지 않고, 안정적인 실루엣의 bbox 사용.
+// 입력은 같은 화면정규화 공간(coverUnit 결과)이라 ref/live 가 직접 비교된다.
+export interface UBox {
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+  size: number;
+}
+export function unitBBox(pts: Pt[] | null | undefined): UBox | null {
+  'worklet';
+  if (!pts || pts.length < 3) return null;
+  let minX = 1e9;
+  let minY = 1e9;
+  let maxX = -1e9;
+  let maxY = -1e9;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w, h, size: Math.max(w, h) };
+}
+
+// 구도 허용오차(화면 정규화). 조정 가능.
+export const FRAMING_TOL = { pos: 0.18, size: 0.28 };
+
+export interface FramingResult {
+  score: number;
+  dpos: number;
+  dsize: number;
+  ref: UBox | null;
+  live: UBox | null;
+}
+export function framingFromUnits(
+  ref: Pt[] | null,
+  live: Pt[] | null,
+): FramingResult {
+  'worklet';
+  const a = unitBBox(ref);
+  const b = unitBBox(live);
+  if (!a || !b) return { score: 0, dpos: 1, dsize: 1, ref: a, live: b };
+  const dpos = Math.hypot(a.cx - b.cx, a.cy - b.cy);
+  const dsize = Math.abs(a.size - b.size) / Math.max(a.size, 0.01);
+  const sc =
+    (Math.max(0, Math.min(1, 1 - dpos / FRAMING_TOL.pos)) +
+      Math.max(0, Math.min(1, 1 - dsize / FRAMING_TOL.size))) /
+    2;
+  return { score: sc, dpos, dsize, ref: a, live: b };
+}
+
+// 구도 보정 방향(한 줄). 거리(크기) 우선 → 위치. 차이 작으면 빈 문자열.
+export function framingGuide(fr: FramingResult): string {
+  'worklet';
+  if (!fr.ref || !fr.live) return '';
+  if (fr.dsize > 0.18) return fr.live.size < fr.ref.size ? '조금 더 가까이' : '조금 더 멀리';
+  if (fr.dpos > 0.12) {
+    const dy = fr.live.cy - fr.ref.cy;
+    const dx = fr.live.cx - fr.ref.cx;
+    if (Math.abs(dy) >= Math.abs(dx)) return dy > 0 ? '조금 위로' : '조금 아래로';
+    return dx > 0 ? '살짝 왼쪽으로' : '살짝 오른쪽으로';
+  }
+  return '';
+}
+
 // 행-스캔 실루엣(앞 절반=왼쪽 모서리 위→아래, 뒤 절반=오른쪽 아래→위)의 x를
 // 각 모서리별 이동평균으로 부드럽게. 들쭉날쭉(머리카락/팔/노이즈) 제거.
 export function smoothEdges(pts: Pt[] | null, win = 4): Pt[] | null {
